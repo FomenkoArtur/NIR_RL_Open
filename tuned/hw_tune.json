@@ -1,0 +1,16 @@
+{
+  "host": "afl",
+  "measured": "2026-11-05T13:42",
+  "cnn": {
+    "devices": [
+      "cuda:0"
+    ],
+    "workers_per_device": 3,
+    "threads": 2,
+    "iters_per_sec": 3.906
+  },
+  "pid": {
+    "procs": 4,
+    "cand_per_sec": 148.164
+  }
+}
