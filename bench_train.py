@@ -50,8 +50,13 @@ def child_list():
 def child():
     """Один режим: несколько итераций PPO, печатает время итерации."""
     hw.prepare()
-    import numpy as np
-    import torch
+    try:
+        import numpy as np
+        import torch
+    except Exception as exc:                           # нет numpy/PyTorch - считать нечего, сообщаем вежливо
+        result = {"error": f"не установлено: {getattr(exc, 'name', None) or exc}"}
+        print("RESULT " + json.dumps(result), flush=True)
+        return
     hw.configure_torch_threads()
     from config import SEED
     from config_rl import RL as RLC, RL_ARCH, RL_TRAIN
@@ -136,12 +141,12 @@ def main():
 
     info = _spawn("--list", {}, 300, "INFO ")
     if "error" in info:
-        print(f"PyTorch не запустился ({info['error']}); считаем только процессор.")
-        info = {"torch": "?", "cuda": None, "hip": None, "devices": [
+        reason = info["error"]
+        info = {"torch": None, "cuda": None, "hip": None, "torch_error": reason, "devices": [
             {"id": "cpu", "kind": "cpu", "name": hw.cpu_name(), "mem_gb": 0, "sm": 0, "cc": "", "backend": "CPU"}]}
     print(hw.report(info) + "\n")
     if not info.get("torch"):
-        print("PyTorch не установлен, поэтому итерацию PPO замерить нельзя. Установите torch "
+        print("Итерацию PPO замерить нельзя (причина выше). Установите torch "
               "(requirements.txt) и запустите bench_train.py снова; tuned/hw_train.json не изменён.")
         return
     devices = [d for d in info["devices"] if args.device is None or d["id"].startswith(args.device)]

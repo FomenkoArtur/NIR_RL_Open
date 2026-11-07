@@ -1,0 +1,18 @@
+diff --git a/hw.py b/hw.py
+index e55192a..7a216eb 100644
+--- a/hw.py
++++ b/hw.py
+@@ -143,7 +143,12 @@ def system_gpus():
+ 
+ def torch_info():
+     """Что видит PyTorch: версия, сборка CUDA/XPU и устройства (cpu всегда последним)."""
+-    import torch
++    try:
++        import torch
++    except Exception:
++        return {"torch": None, "cuda": None, "hip": None,
++                "devices": [{"id": "cpu", "kind": "cpu", "name": cpu_name(), "mem_gb": 0.0,
++                             "sm": 0, "cc": "", "backend": "CPU"}]}
+     devices = []
+     if torch.cuda.is_available():
+         for i in range(torch.cuda.device_count()):

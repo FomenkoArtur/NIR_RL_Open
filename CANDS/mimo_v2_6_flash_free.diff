@@ -1,0 +1,72 @@
+diff --git a/bench_train.py b/bench_train.py
+index 08708bc..1888add 100644
+--- a/bench_train.py
++++ b/bench_train.py
+@@ -46,8 +46,12 @@ def child_list():
+ def child():
+     """Один режим: несколько итераций PPO, печатает время итерации."""
+     hw.prepare()
+-    import numpy as np
+-    import torch
++    try:
++        import numpy as np
++        import torch
++    except ImportError as exc:                         # нет numpy/PyTorch - считать нечего
++        print("RESULT " + json.dumps({"error": f"не установлено: {exc.name}"}), flush=True)
++        return
+     hw.configure_torch_threads()
+     from config import SEED
+     from config_rl import RL as RLC, RL_ARCH, RL_TRAIN
+@@ -125,10 +129,14 @@ def main():
+ 
+     info = _spawn("--list", {}, 300, "INFO ")
+     if "error" in info:
+-        print(f"PyTorch не запустился ({info['error']}); считаем только процессор.")
+-        info = {"torch": "?", "cuda": None, "hip": None, "devices": [
++        reason = info["error"]
++        info = {"torch": None, "cuda": None, "hip": None, "devices": [
+             {"id": "cpu", "kind": "cpu", "name": hw.cpu_name(), "mem_gb": 0, "sm": 0, "cc": "", "backend": "CPU"}]}
++        print(f"PyTorch не запустился ({reason}).\n")
+     print(hw.report(info) + "\n")
++    if not info.get("torch"):
++        print("Замерить итерацию PPO без работающего PyTorch нельзя: tuned/hw_train.json не изменён.")
++        return
+     devices = [d for d in info["devices"] if args.device is None or d["id"].startswith(args.device)]
+     if not devices:
+         print("Нет устройств, подходящих под --device.")
+diff --git a/hw.py b/hw.py
+index e55192a..d4f91be 100644
+--- a/hw.py
++++ b/hw.py
+@@ -142,8 +142,14 @@ def system_gpus():
+ 
+ 
+ def torch_info():
+-    """Что видит PyTorch: версия, сборка CUDA/XPU и устройства (cpu всегда последним)."""
+-    import torch
++    """Что видит PyTorch: версия, сборка CUDA/XPU и устройства (cpu всегда последним).
++    Без установленного PyTorch остаётся только процессор: считать на видеокарте всё равно не на чем."""
++    try:
++        import torch
++    except ImportError:
++        return {"torch": None, "cuda": None, "hip": None,
++                "devices": [{"id": "cpu", "kind": "cpu", "name": cpu_name(), "mem_gb": 0.0,
++                             "sm": 0, "cc": "", "backend": "CPU"}]}
+     devices = []
+     if torch.cuda.is_available():
+         for i in range(torch.cuda.device_count()):
+@@ -176,8 +182,12 @@ def report(info=None):
+     info = info or torch_info()
+     lines = [f"Процессор: {cpu_name()}; физических ядер {physical_cores()}, логических {logical_cores()}"]
+     usable = [d for d in info["devices"] if d["kind"] != "cpu"]
+-    lines.append(f"PyTorch {info['torch']}" + (f", CUDA {info['cuda']}" if info.get("cuda") else
+-                                              f", ROCm {info['hip']}" if info.get("hip") else ", сборка без CUDA"))
++    if info.get("torch"):
++        lines.append(f"PyTorch {info['torch']}" + (f", CUDA {info['cuda']}" if info.get("cuda") else
++                                                  f", ROCm {info['hip']}" if info.get("hip") else ", сборка без CUDA"))
++    else:
++        lines.append("PyTorch не установлен: расчёты пойдут только на процессоре "
++                     "(поставьте сборку PyTorch из requirements.txt)")
+     gpus = system_gpus()
+     lines.append("Видеоадаптеры в системе: " + ("; ".join(f"{g['name']}" + (f" ({g['mem_gb']} ГБ)" if g["mem_gb"] else "")
+                                                          for g in gpus) if gpus else "не найдены"))

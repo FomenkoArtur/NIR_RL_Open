@@ -1,0 +1,38 @@
+diff --git a/hw.py b/hw.py
+index e55192a..3e8cdd5 100644
+--- a/hw.py
++++ b/hw.py
+@@ -142,8 +142,17 @@ def system_gpus():
+ 
+ 
+ def torch_info():
+-    """Что видит PyTorch: версия, сборка CUDA/XPU и устройства (cpu всегда последним)."""
+-    import torch
++    """Что видит PyTorch: версия, сборка CUDA/XPU и устройства (cpu всегда последним).
++
++    Если PyTorch не установлен/не импортируется (нет torch) - считаем только процессор: это и есть
++    корректный ответ для "при отсутствии CUDA - CPU с максимумом потоков".
++    """
++    info = {"torch": "?", "cuda": None, "hip": None, "devices": []}
++    try:
++        import torch
++    except Exception:
++        info["devices"].append({"id": "cpu", "kind": "cpu", "name": cpu_name(), "mem_gb": 0.0, "sm": 0, "cc": "", "backend": "CPU"})
++        return info
+     devices = []
+     if torch.cuda.is_available():
+         for i in range(torch.cuda.device_count()):
+@@ -162,8 +171,11 @@ def torch_info():
+     except Exception:
+         pass
+     devices.append({"id": "cpu", "kind": "cpu", "name": cpu_name(), "mem_gb": 0.0, "sm": 0, "cc": "", "backend": "CPU"})
+-    return {"torch": torch.__version__, "cuda": getattr(torch.version, "cuda", None),
+-            "hip": getattr(torch.version, "hip", None), "devices": devices}
++    info["devices"] = devices
++    info["torch"] = torch.__version__
++    info["cuda"] = getattr(torch.version, "cuda", None)
++    info["hip"] = getattr(torch.version, "hip", None)
++    return info
+ 
+ 
+ def _rank(d):
