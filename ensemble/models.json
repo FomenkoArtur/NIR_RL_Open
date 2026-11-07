@@ -1,10 +1,13 @@
 {
   "generators": [
     "opencode/deepseek-v4.1-flash-free",
-    "opencode/glm-5.3-flash-free",
-    "opencode/mimo-v2.6-flash-free",
-    "opencode/nemotron-3.5-super-vl-free"
+    "opencode/nemotron-3.5-super-vl-free",
+    "opencode/flint-40b-free",
+    "opencode/mimo-v2.6-flash-free"
   ],
-  "judges": ["opencode/flint-40b-free", "opencode/nemotron-3.5-lightning-free"],
+  "judges": [
+    "opencode/beam-free",
+    "opencode/nemotron-3.5-lightning-free"
+  ],
   "fuser": "opencode/glm-5.3-flash-free"
 }
