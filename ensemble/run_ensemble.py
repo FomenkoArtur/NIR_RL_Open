@@ -63,9 +63,18 @@ def make_worktree(wp, name, base):
 
 def ask(model, text, cwd, tag, timeout):
     (cwd / "TASK.md").write_text(text, encoding="utf-8")
-    cmd = [OC, "run", "--attach", SERVER, "--dir", str(cwd), "-m", model,
-           "--auto", "--format", "json", "--title", tag, MSG]
-    rc, out = sh(cmd, cwd, timeout)
+    url = os.environ.get("OC_URL", "").strip()
+    cmd = [OC, "run"]
+    if url:
+        cmd += ["--server", url]
+    cmd += ["-m", model, "--auto", "--format", "json", "--title", tag, MSG]
+    try:
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+        rc = p.returncode
+        out = (p.stdout or "") + (p.stderr or "")
+    except subprocess.TimeoutExpired:
+        rc, out = 124, f"TIMEOUT after {timeout}s"
     (cwd / f"_oc_{tag}.log").write_text(out[-20000:], encoding="utf-8")
     return rc
 
