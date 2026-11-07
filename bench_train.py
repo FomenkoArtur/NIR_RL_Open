@@ -15,6 +15,8 @@
   3) для победителя - перебор числа сред: берётся наибольшее, при котором итерация дольше не более чем в ENV_SLACK раз
      (больше сред = больше опыта за итерацию почти даром, пока видеокарта не загружена); меньше значения по умолчанию - никогда.
 Каждый режим - отдельный процесс (потоки и закрепление нельзя поменять после import torch).
+Если PyTorch не установлен, --list всё равно показывает оборудование, а полный прогон сообщает,
+что замер итерации невозможен, и не трогает tuned/hw_train.json.
 """
 
 import argparse
@@ -40,7 +42,9 @@ MB_PER_ENV = 0.33 * 1.6                      # память на одну сре
 # ------------------------------------------------ дочерние процессы ------------------------------------------------
 def child_list():
     """Что видит PyTorch (отдельный процесс, чтобы родитель не занимал память видеокарты)."""
-    print("INFO " + json.dumps(hw.torch_info()), flush=True)
+    info = hw.torch_info()
+    print(hw.report(info), flush=True)                  # человекочитаемый отчёт: --list печатает его напрямую
+    print("INFO " + json.dumps(info), flush=True)       # машинная строка для родительского процесса
 
 
 def child():
@@ -68,7 +72,14 @@ def child():
             agent.iterate()                            # внутри есть синхронизация (.item()), время честное
             if i >= warm:
                 laps.append(time.perf_counter() - t)
-        peak = torch.cuda.max_memory_allocated(dev) / 2 ** 20 if dev.type == "cuda" else 0.0
+        peak = 0.0
+        if dev.type == "cuda":
+            peak = torch.cuda.max_memory_allocated(dev) / 2 ** 20
+        elif dev.type == "xpu":
+            try:
+                peak = torch.xpu.max_memory_allocated(dev) / 2 ** 20
+            except Exception:
+                peak = 0.0
         result = {"iter_sec": statistics.median(laps), "n_env": agent.n_env, "device": str(dev),
                   "threads": torch.get_num_threads(), "peak_mb": round(peak)}
     except Exception as exc:                           # нехватка памяти, неподдерживаемая операция и т.п.
@@ -129,6 +140,10 @@ def main():
         info = {"torch": "?", "cuda": None, "hip": None, "devices": [
             {"id": "cpu", "kind": "cpu", "name": hw.cpu_name(), "mem_gb": 0, "sm": 0, "cc": "", "backend": "CPU"}]}
     print(hw.report(info) + "\n")
+    if not info.get("torch"):
+        print("PyTorch не установлен, поэтому итерацию PPO замерить нельзя. Установите torch "
+              "(requirements.txt) и запустите bench_train.py снова; tuned/hw_train.json не изменён.")
+        return
     devices = [d for d in info["devices"] if args.device is None or d["id"].startswith(args.device)]
     if not devices:
         print("Нет устройств, подходящих под --device.")

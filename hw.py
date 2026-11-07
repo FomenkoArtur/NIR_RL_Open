@@ -11,6 +11,9 @@ NIR_DEVICE - auto | cpu | cuda | cuda:N | xpu | xpu:N.   NIR_THREADS - пото�
 NIR_PIN - номера логических процессоров через запятую (только Windows, число номеров = числу потоков), none - не закреплять.
 NIR_ENVS - сколько сред PPO считать параллельно (на видеокарте это главный параметр загрузки).
 NIR_TF32 - 1 (по умолчанию) разрешить TF32 на видеокартах NVIDIA Ampere и новее, 0 - выключить.
+
+Если PyTorch ещё не установлен, модуль не падает: определяется только процессор (CPU), а в отчёте
+появляется причина. Детекция CUDA/XPU при этом не отключается - она работает, как только torch доступен.
 """
 
 import contextlib
@@ -141,16 +144,33 @@ def system_gpus():
     return found
 
 
+def _cpu_device():
+    """Описание процессора в том же формате, что и устройства PyTorch."""
+    return {"id": "cpu", "kind": "cpu", "name": cpu_name(), "mem_gb": 0.0, "sm": 0, "cc": "", "backend": "CPU"}
+
+
 def torch_info():
-    """Что видит PyTorch: версия, сборка CUDA/XPU и устройства (cpu всегда последним)."""
-    import torch
+    """Что видит PyTorch: версия, сборка CUDA/XPU и устройства (cpu всегда последним).
+
+    Если PyTorch не установлен или не импортируется, возвращается только CPU и ключ torch_error:
+    остальной код (отчёты, выбор устройства) продолжает работать.
+    """
+    try:
+        import torch
+    except Exception as exc:                                      # torch ещё не установлен - это не ошибка запуска
+        return {"torch": None, "cuda": None, "hip": None, "devices": [_cpu_device()],
+                "torch_error": f"{type(exc).__name__}: {exc}"}
     devices = []
-    if torch.cuda.is_available():
-        for i in range(torch.cuda.device_count()):
-            p = torch.cuda.get_device_properties(i)
-            devices.append({"id": f"cuda:{i}", "kind": "cuda", "name": p.name, "mem_gb": round(p.total_memory / 2 ** 30, 1),
-                            "sm": int(p.multi_processor_count), "cc": f"{p.major}.{p.minor}",
-                            "backend": "ROCm" if getattr(torch.version, "hip", None) else "CUDA"})
+    try:
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                p = torch.cuda.get_device_properties(i)
+                devices.append({"id": f"cuda:{i}", "kind": "cuda", "name": p.name,
+                                "mem_gb": round(p.total_memory / 2 ** 30, 1),
+                                "sm": int(p.multi_processor_count), "cc": f"{p.major}.{p.minor}",
+                                "backend": "ROCm" if getattr(torch.version, "hip", None) else "CUDA"})
+    except Exception:
+        pass                                                      # драйвер/сборка CUDA недоступны - остаются другие устройства
     xpu = getattr(torch, "xpu", None)
     try:
         if xpu is not None and xpu.is_available():
@@ -161,7 +181,7 @@ def torch_info():
                                 "sm": int(getattr(p, "gpu_eu_count", 0) or 0), "cc": "", "backend": "XPU"})
     except Exception:
         pass
-    devices.append({"id": "cpu", "kind": "cpu", "name": cpu_name(), "mem_gb": 0.0, "sm": 0, "cc": "", "backend": "CPU"})
+    devices.append(_cpu_device())
     return {"torch": torch.__version__, "cuda": getattr(torch.version, "cuda", None),
             "hip": getattr(torch.version, "hip", None), "devices": devices}
 
@@ -176,14 +196,20 @@ def report(info=None):
     info = info or torch_info()
     lines = [f"Процессор: {cpu_name()}; физических ядер {physical_cores()}, логических {logical_cores()}"]
     usable = [d for d in info["devices"] if d["kind"] != "cpu"]
-    lines.append(f"PyTorch {info['torch']}" + (f", CUDA {info['cuda']}" if info.get("cuda") else
-                                              f", ROCm {info['hip']}" if info.get("hip") else ", сборка без CUDA"))
+    if info.get("torch"):
+        lines.append(f"PyTorch {info['torch']}" + (f", CUDA {info['cuda']}" if info.get("cuda") else
+                                                  f", ROCm {info['hip']}" if info.get("hip") else ", сборка без CUDA"))
+    else:
+        lines.append("PyTorch не установлен: доступен только процессор"
+                     + (f" ({info['torch_error']})" if info.get("torch_error") else ""))
     gpus = system_gpus()
     lines.append("Видеоадаптеры в системе: " + ("; ".join(f"{g['name']}" + (f" ({g['mem_gb']} ГБ)" if g["mem_gb"] else "")
                                                          for g in gpus) if gpus else "не найдены"))
     for d in usable:
         lines.append(f"  доступно для обучения: {d['id']} - {d['name']}, {d['backend']}, {d['mem_gb']} ГБ"
                      + (f", {d['sm']} мультипроцессоров, capability {d['cc']}" if d["kind"] == "cuda" else ""))
+    cpu = next((d for d in info["devices"] if d["kind"] == "cpu"), None)
+    lines.append(f"  доступно для обучения: cpu - {(cpu or {}).get('name') or cpu_name()}, CPU")
     kinds = {d["kind"] for d in usable}
     vendors = {g["vendor"] for g in gpus}
     if "nvidia" in vendors and "cuda" not in kinds:
@@ -206,6 +232,8 @@ def _load_tuned():
             data = json.load(f)
     except Exception:
         return {}, ""
+    if not isinstance(data, dict):
+        return {}, "tuned/hw_train.json имеет неверный формат и игнорируется; запустите bench_train.py"
     if data.get("host") != platform.node():
         return {}, (f"tuned/hw_train.json получен на другом компьютере ({data.get('host') or 'не указан'}) и "
                     f"игнорируется; запустите bench_train.py на этом компьютере")
@@ -234,11 +262,16 @@ TF32 = os.environ.get("NIR_TF32", "1") != "0"
 
 def envs_for(dev_type):
     """Сколько сред PPO считать параллельно на устройстве этого типа; 0 - оставить значение из config_rl."""
-    value = os.environ.get("NIR_ENVS", "")
+    value = os.environ.get("NIR_ENVS", "").strip()
     if value.isdigit():
-        return int(value)
-    tuned_type = str(_tuned.get("device", "")).split(":")[0]
-    return int(_tuned.get("envs", 0) or 0) if tuned_type == dev_type else 0
+        return max(0, int(value))
+    kind = str(dev_type or "").split(":")[0].strip().lower()        # принимаем и 'cuda', и 'cuda:0'
+    tuned_type = str(_tuned.get("device", "")).split(":")[0].strip().lower()
+    try:
+        tuned_envs = max(0, int(_tuned.get("envs", 0) or 0))
+    except (TypeError, ValueError):
+        tuned_envs = 0
+    return tuned_envs if kind and tuned_type == kind else 0
 
 
 # ------------------------------------------------ процесс ------------------------------------------------
@@ -323,9 +356,12 @@ def pick_device():
     if DEVICE != "auto":
         if DEVICE in {d["id"] for d in gpus}:
             return DEVICE
-        same = [d for d in gpus if d["kind"] == DEVICE.split(":")[0]]
-        if same:                                                  # указан тип без номера - берём самое мощное
-            return max(same, key=_rank)["id"]
+        kind = DEVICE.split(":")[0]
+        if ":" not in DEVICE:                                     # указан тип без номера - берём самое мощное
+            same = [d for d in gpus if d["kind"] == kind]
+            if same:
+                return max(same, key=_rank)["id"]
+        return "cpu"                                              # запрошенного устройства нет - честный откат на CPU
     for kind in ("cuda", "xpu"):                                  # CUDA в приоритете, затем графика Intel
         same = [d for d in gpus if d["kind"] == kind]
         if same:
