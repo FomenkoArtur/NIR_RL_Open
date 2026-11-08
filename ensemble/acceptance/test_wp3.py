@@ -1,4 +1,3 @@
-@'
 """
 Приёмочные тесты для WP3 — структура CNN 8->8, без обучения.
 """
@@ -75,4 +74,3 @@ def test_plant_py_unchanged():
 
 def test_plant_equations_exists():
     assert Path("plant_equations.py").exists()
-'@ | Set-Content -Encoding utf8 ensemble\acceptance\test_wp3.py
