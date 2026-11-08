@@ -1,10 +1,4 @@
-
----
-
-## `ensemble/acceptance/test_wp2.py`
-
-```python
-"""
+﻿"""
 Приёмочные тесты для WP2 — физичные сценарии в scenarios.py.
 """
 
@@ -13,8 +7,6 @@ from pathlib import Path
 
 import numpy as np
 
-
-# ---------- Существующие S1–S4 не сломаны ----------
 
 def test_s1_trend_x1():
     """S1 — линейный тренд по x1, без скачков."""
@@ -66,8 +58,6 @@ def test_custom_profile_jump():
     rate, jump = custom_profile(5, "jump", 1.6, t0=40)
     assert abs(jump[5]) > 0
 
-
-# ---------- Физичные тренды T1–T3 ----------
 
 def test_get_physical_trends_exists():
     """Функция get_physical_trends() присутствует."""
@@ -133,8 +123,6 @@ def test_physical_trends_hevyside_form():
         assert np.abs(after).max() > 0, f"{name}: после t0 скорость нулевая"
 
 
-# ---------- Физика в комментариях ----------
-
 def test_physical_comments_in_source():
     """В scenarios.py — минимум 3 физических обоснования."""
     src = Path("scenarios.py").read_text(encoding="utf-8").lower()
@@ -148,7 +136,6 @@ def test_physical_comments_in_source():
 def test_physical_trends_have_long_comments():
     """Для каждого T1–T3 — комментарий минимум 100 символов с физикой."""
     src = Path("scenarios.py").read_text(encoding="utf-8")
-    # Ищем комментарии, где упоминаются T1, T2, T3
     for name in ('T1', 'T2', 'T3'):
         found_comment = False
         for line in src.splitlines():
@@ -157,9 +144,7 @@ def test_physical_trends_have_long_comments():
                 if len(comment_part) >= 30:
                     found_comment = True
                     break
-        # Альтернативно: ищем блок комментариев перед функцией
         if not found_comment:
-            # Ищем docstring функции
             fn_idx = src.find(f'def {name.lower()}')
             if fn_idx < 0:
                 fn_idx = src.find(f'"{name}"')
@@ -170,16 +155,12 @@ def test_physical_trends_have_long_comments():
         assert found_comment, f"тренд {name}: нет подробного физического комментария"
 
 
-# ---------- Суперкритерий не должен просочиться ----------
-
 def test_no_supercriterion_in_scenarios():
     """В scenarios.py нет суперкритерия — он только для визуализации."""
     src = Path("scenarios.py").read_text(encoding="utf-8").lower()
     for word in ("supercrit", "superkrit", "ahp_w", "k_total", "суперкритери"):
         assert word not in src, f"scenarios.py содержит '{word}'"
 
-
-# ---------- Не изменены ключевые файлы ----------
 
 def test_plant_py_unchanged():
     """plant.py не изменён."""
