@@ -12,25 +12,17 @@ import numpy as np
 
 import config
 import hw
-import mpc_control
-import pid_control
 import rl_control
 import rl_trainer
 from config import G, N_PARAMS
 from config_rl import RL
-from fastsim import episode_noise
 from gui.afc_bode import BodePlot, NyquistPlot
 from gui.labels import PARAMETERS, config_rows
 from gui.nomenclature import items
 from gui.plots import ChartPlot, SimulationPlot, TrainingPlot
-from gui.simulation import EpisodeResult, simulate
+from gui.simulation import EpisodeResult, simulate_all  # Импортируем новую функцию!
 from gui.workers import ExperimentWorker, TrainWorker
-from metrics import compute_metrics, out_of_control_rate
 from plant import plant
-from scenarios import get_disturbance_profile
-from pid_control import PIDController
-from mpc_control import MPCController
-
 
 # === ОПЦИОНАЛЬНЫЙ МОДУЛЬ ИНДИКАТОРА СОСТОЯНИЯ ===
 try:
@@ -38,36 +30,9 @@ try:
 except ImportError:
     attach_rpms_indicator = None
 
-
-# =================================================
-
-
-
 WEIGHTS_PATH = Path(rl_trainer.OUT_FILE)
 SCENARIO_ORDER = ['S1', 'S2', 'S3', 'S4']
-MODE_LABELS = {'rl': "С регулятором (RL)"}
-
-
-class _TwinPlant:
-    """Адаптер цифрового двойника (gui/plant.py) под интерфейс
-    pid_control.PIDController / mpc_control.MPCController.
-
-    Регуляторы действуют на нормализованные критерии N_i с уставкой G.
-    Положительное u_i понижает x_i (формула evolve: -C_RAW * B * u), поэтому
-    признак действия привода s_i = +1 и обратная связь отрицательная.
-    """
-
-    N_STATES = N_PARAMS
-
-    def __init__(self):
-        self.tau = np.ones(N_PARAMS)
-        self.b = -np.eye(N_PARAMS)
-
-    def setpoint(self, t):
-        return np.full(N_PARAMS, float(G))
-
-    def derivatives(self, x, u, t):
-        return np.zeros(N_PARAMS)
+MODE_LABELS = {'rl': "С регулятором (RL)", 'pid': "PID-регулятор", 'mpc': "MPC"}
 
 
 def make_table(headers, rows=0):
@@ -91,7 +56,6 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Система автоматического управления качеством продукции — апробация контура")
-        # Увеличен размер окна для максимальной наглядности на презентации (Full HD)
         self.resize(1920, 1080)
 
         self.model = None
@@ -112,19 +76,11 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_experiment_tab(), "Таблица 1 (эксперимент)")
         self.tabs.addTab(self._build_parameters_tab(), "Параметры модели")
 
-        # Частотные характеристики замкнутого контура с RL (вкладки АФХ и Боде).
+        # Частотные характеристики замкнутого контура с RL
         self.afc_plot = NyquistPlot()
         self.bode_plot = BodePlot()
         self.tabs.addTab(self._build_afc_tab(), "АФХ")
         self.tabs.addTab(self._build_bode_tab(), "Боде")
-
-        # Адаптер цифрового двойника и эталоны ПИД/МПС для сравнительного моделирования.
-        self._twin_plant = _TwinPlant()
-        self.pid_controller = PIDController(
-            self._twin_plant,
-            kp=float(config.KP), ki=float(config.KI), kd=float(config.KD), u_max=1.0,
-        )
-        self.mpc_controller = MPCController(self._twin_plant, horizon=10)
 
         self.model_label = QLabel()
         self.statusBar().addPermanentWidget(self.model_label)
@@ -141,31 +97,30 @@ class MainWindow(QMainWindow):
         self.scenario_box = QComboBox()
         for key in SCENARIO_ORDER:
             self.scenario_box.addItem(f"{key} — {config.SCENARIOS[key]['description']}", key)
+
         self.scale_spin = QDoubleSpinBox()
         self.scale_spin.setRange(0.5, 1.5)
         self.scale_spin.setSingleStep(0.1)
         self.scale_spin.setDecimals(2)
         self.scale_spin.setValue(1.0)
+
         self.seed_spin = QSpinBox()
         self.seed_spin.setRange(0, 999999)
         self.seed_spin.setValue(config.SEED)
-        self.rl_check = QCheckBox(MODE_LABELS['rl'])
-        self.rl_check.setChecked(True)
+
+        self.nomenclature_box = QComboBox()
+        for item in items():
+            self.nomenclature_box.addItem(item["name"], item["key"])
+
         self.animate_check = QCheckBox("Анимировать построение графика")
         self.animate_check.setChecked(True)
         self.run_button = QPushButton("Запустить моделирование")
         self.run_button.clicked.connect(self.run_simulation)
 
-        self.nomenclature_box = QComboBox()
-        for item in items():
-            self.nomenclature_box.addItem(item["name"], item["key"])
-        self.nomenclature_box.setCurrentIndex(0)
-
         form.addRow("Сценарий", self.scenario_box)
         form.addRow("Масштаб возмущения", self.scale_spin)
         form.addRow("Зерно ГСЧ (seed)", self.seed_spin)
         form.addRow("Номенклатура", self.nomenclature_box)
-        form.addRow(self.rl_check)
         form.addRow(self.animate_check)
         form.addRow(self.run_button)
 
@@ -188,7 +143,7 @@ class MainWindow(QMainWindow):
         playback.addWidget(QLabel("Скорость"))
         playback.addWidget(self.speed_slider)
 
-        metrics_box = QGroupBox("Показатели качества")
+        metrics_box = QGroupBox("Показатели качества (RL)")
         metrics_layout = QVBoxLayout(metrics_box)
         self.metrics_table = make_table(["Показатель", "Без рег.", "С RL"], 5)
         self.metrics_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -205,17 +160,15 @@ class MainWindow(QMainWindow):
         left.addWidget(playback_box)
         left.addWidget(metrics_box)
 
-        # === ВСТРАИВАНИЕ ИНДИКАТОРА (если модуль включен в настройках) ===
+        # Индикатор встраивается СТРОГО для RL
         if attach_rpms_indicator is not None:
             self.rpms_indicator = attach_rpms_indicator(self, left)
 
         left.addWidget(self.save_plot_button)
         left.addStretch()
-        # =================================================================
 
         left_widget = QWidget()
         left_widget.setLayout(left)
-        # Ширина левой панели увеличена до комфортной (было 280, стало 360)
         left_widget.setFixedWidth(360)
 
         self.sim_plot = SimulationPlot()
@@ -279,7 +232,6 @@ class MainWindow(QMainWindow):
         left.addWidget(self.train_log, 1)
         left_widget = QWidget()
         left_widget.setLayout(left)
-        # Ширина левой панели увеличена до комфортной (было 280, стало 360)
         left_widget.setFixedWidth(360)
         self.train_plot = TrainingPlot()
         root.addWidget(left_widget)
@@ -345,7 +297,6 @@ class MainWindow(QMainWindow):
         return tab
 
     def _build_afc_tab(self):
-        """Вкладка «АФХ» — годограф Найквиста замкнутого контура с RL."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.addLayout(self.afc_plot.control_row())
@@ -353,7 +304,6 @@ class MainWindow(QMainWindow):
         return tab
 
     def _build_bode_tab(self):
-        """Вкладка «Боде» — ЛАЧХ и ЛФЧХ замкнутого контура с RL."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.addLayout(self.bode_plot.control_row())
@@ -408,77 +358,50 @@ class MainWindow(QMainWindow):
         return False
 
     def run_simulation(self):
-        scenario = self.scenario_box.currentData()
-        seed = self.seed_spin.value()
-        scale = self.scale_spin.value()
+        try:
+            scenario = self.scenario_box.currentData()
+            seed = self.seed_spin.value()
+            scale = self.scale_spin.value()
+            nom_key = self.nomenclature_box.currentData()
 
-        self.timer.stop()
-        self.play_button.setText("Воспроизвести")
-        results = {}
-        # Базовый контур «без регулятора» считается всегда для сравнения в метриках.
-        results['none'] = simulate(scenario, seed, scale)
-        # RL первым: gui/rpms_indicator.py берёт results.get('cnn', первый элемент) - так индикатор следит за RL-регулятором
-        if self.model is not None:
-            results['rl'] = simulate(scenario, seed, scale, self.model)
-        results['pid'] = self._run_twin(scenario, seed, scale, self.pid_controller)
-        results['mpc'] = self._run_twin(scenario, seed, scale, self.mpc_controller)
-        self.results = results
-        self.scenario = scenario
+            self.timer.stop()
+            self.play_button.setText("Воспроизвести")
 
-        description = config.SCENARIOS[scenario]['description']
-        self.sim_plot.show_results(results, scenario, description, scale, seed)
-        self._fill_metrics()
-        self._refresh_chart()
+            self.results = simulate_all(scenario, seed, scale, nom_key, self.model)
+            self.scenario = scenario
 
-        if self.animate_check.isChecked():
-            self.frame_slider.setValue(0)
-            self.sim_plot.set_frame(0)
-            self.timer.start()
-            self.play_button.setText("Пауза")
-        else:
-            self.frame_slider.setValue(config.T_TOTAL)
-            self.sim_plot.set_frame(config.T_TOTAL)
+            description = config.SCENARIOS[scenario]['description']
+            self.sim_plot.show_results(self.results, scenario, description, scale, seed)
 
-    def _run_twin(self, scenario, seed, scale, controller):
-        """Эпизод цифрового двойника (gui/plant.py) под управлением controller
-        (None — без управления) с тем же профилем возмущений и шумом, что у
-        RL-симуляции. -> EpisodeResult."""
-        rate, jump = get_disturbance_profile(scenario, config.T_START, scale)
-        noise = episode_noise(seed)
-        x = plant.x_bar.copy()
-        if controller is not None:
-            controller.reset()
-        X = np.zeros((config.T_TOTAL, N_PARAMS))
-        N = np.zeros((config.T_TOTAL, N_PARAMS))
-        K = np.zeros(config.T_TOTAL)
-        eps = np.zeros(config.T_TOTAL)
-        U = np.zeros((config.T_TOTAL, N_PARAMS))
-        normalizer = plant.make_normalizer()
-        for t in range(config.T_TOTAL):
-            if t == config.T_START:
-                x = x + jump
-            n = normalizer.update(x)
-            N[t] = n
-            eps[t] = G - float(n.mean())
-            K[t] = float(plant.compute_super_criterion(n))
-            u = np.zeros(N_PARAMS) if controller is None else np.asarray(controller.act(n, t), dtype=float)
-            U[t] = u
-            X[t] = x
-            if t < config.T_TOTAL - 1:
-                x = plant.evolve(x, rate[t], u, noise[t])
-        ts, iae, idle_rate = compute_metrics(eps, U, config.T_START)
-        oc_rate = out_of_control_rate(N, config.T_START)
-        return EpisodeResult(X, N, K, eps, U, ts, iae, idle_rate, oc_rate)
+            self._fill_metrics()
+            self._refresh_chart()
+
+            if self.animate_check.isChecked():
+                self.frame_slider.setValue(0)
+                self.sim_plot.set_frame(0)
+                self.timer.start()
+                self.play_button.setText("Пауза")
+            else:
+                self.frame_slider.setValue(config.T_TOTAL)
+                self.sim_plot.set_frame(config.T_TOTAL)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Ошибка моделирования", f"Произошла ошибка:\n{str(e)}")
 
     def _fill_metrics(self):
+        # Метрики показываем только для RL (как основной защищаемый результат)
         rows = ["Ts, тактов", "IAE", "Доля тактов |u| > порога, %", "Макс. |ΔK| после t0",
                 "Доля тактов с Nᵢ вне [0,05; 0,95], %"]
+        none = self.results.get('none')  # Если нет регулятора, считаем пустым
+        rl = self.results.get('rl')
+
         for row, name in enumerate(rows):
             set_cell(self.metrics_table, row, 0, name, Qt.AlignLeft)
-            for column, mode in ((1, 'none'), (2, 'rl')):
-                result = self.results.get(mode)
-                set_cell(self.metrics_table, row, column, self._metric_text(result, row))
-        none, rl = self.results.get('none'), self.results.get('rl')
+            set_cell(self.metrics_table, row, 1, self._metric_text(none, row))
+            set_cell(self.metrics_table, row, 2, self._metric_text(rl, row))
+
         if none is not None and rl is not None and none.iae > 0:
             reduction = 100 * (1 - rl.iae / none.iae)
             self.reduction_label.setText(f"Снижение IAE: {reduction:.1f} %")
@@ -507,7 +430,7 @@ class MainWindow(QMainWindow):
         result = self.results.get(mode)
         if result is None:
             mode, result = next(iter(self.results.items()))
-        self.chart_plot.show_chart(result, self.chart_param_box.currentIndex(), MODE_LABELS.get(mode, "Без регулятора" if mode == "none" else mode))
+        self.chart_plot.show_chart(result, self.chart_param_box.currentIndex(), MODE_LABELS.get(mode, mode))
 
     def toggle_playback(self):
         if not self.results:
@@ -564,11 +487,11 @@ class MainWindow(QMainWindow):
             self.stop_button.setEnabled(False)
 
     def _on_iter_done(self, iteration, ret, kl, val_j):
-        checked = val_j == val_j                      # nan - проверка в эту итерацию не считалась
+        checked = val_j == val_j
         self.train_plot.add_point(iteration, ret, val_j if checked else None)
         self.train_progress.setValue(iteration)
         self.train_log.appendPlainText(
-            f"Итерация {iteration}: доход = {ret:.3f}, KL = {kl:.4f}" + (f", J (проверка) = {val_j:.3f}" if checked else "")
+            f"Итерация {iteration}: доход = {ret:.3f}, KL = {kl:.4f}" + (f", J = {val_j:.3f}" if checked else "")
         )
 
     def _on_training_succeeded(self, model):
@@ -587,7 +510,7 @@ class MainWindow(QMainWindow):
         self.train_worker = None
 
     def load_weights_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Загрузить веса RL-регулятора", str(WEIGHTS_PATH.parent), "PyTorch (*.pt *.pth)")
+        path, _ = QFileDialog.getOpenFileName(self, "Загрузить веса", str(WEIGHTS_PATH.parent), "PyTorch (*.pt *.pth)")
         if path:
             self._load_weights(path)
 

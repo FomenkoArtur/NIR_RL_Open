@@ -1,9 +1,12 @@
-numpy>=1.26.4
-pandas>=2.2.2
-matplotlib>=3.8.4
 --extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.2.0+cu121
+numpy>=2.0.2
+pandas>=2.2.2
+scipy>=1.11.0
+matplotlib>=3.8.4
+torch==2.5.1+cu121
 PySide6>=6.6.3
 cma>=3.3.0
 optuna>=3.6.1
 psutil>=5.9.8
+scikit-learn>=1.4.0
+pytest>=8.0.0

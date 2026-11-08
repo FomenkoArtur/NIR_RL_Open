@@ -1,48 +1,38 @@
-"""Справочник номенклатуры изделий (WP6).
-
-Вал, Фланец, Корпус — типы изделий участка металлообработки.
-Для каждой номенклатуры задаются номинальные параметры объекта
-(статический коэффициент передачи и постоянная времени по каналам),
-используемые при расчёте частотных характеристик на вкладках АФХ/Боде.
-"""
-from __future__ import annotations
-
 NOMENCLATURE = [
     {"key": "shaft", "name": "Вал", "description": "Токарная обработка"},
     {"key": "flange", "name": "Фланец", "description": "Фрезерная обработка"},
     {"key": "housing", "name": "Корпус", "description": "Закалка"},
 ]
 
-
-def items():
-    """Список записей справочника в порядке отображения в ComboBox."""
-    return list(NOMENCLATURE)
-
-
-def names():
-    """Человекочитаемые номенклатуры для выпадающего списка."""
-    return [item["name"] for item in NOMENCLATURE]
-
-
-def find(name_or_key):
-    """Запись по имени или ключу; None, если не найдена."""
-    for item in NOMENCLATURE:
-        if item["name"] == name_or_key or item["key"] == name_or_key:
-            return item
-    return None
-
-
-# Номинальные параметры цифрового двойника по номенклатуре.
-# Дискретная первоканальная модель x[k+1] = a*x[k] + b*u[k] с
-# инерцией a = A_CUR и входным коэффициентом b, выбранным так, чтобы
-# статический коэффициент передачи объекта был равен k (b = k*(1 - a)).
-NOMINAL_PARAMS = {
-    "shaft":  {"k": 1.00, "tau": 1.2},
-    "flange": {"k": 0.85, "tau": 1.0},
-    "housing": {"k": 1.20, "tau": 1.5},
+# Разные физические параметры (a - инерция, c - эффективность привода)
+PLANT_PARAMS = {
+    "shaft":   {"a": 0.99, "c": 0.10},  # Номинал
+    "flange":  {"a": 0.98, "c": 0.15},  # Легкий, быстрый
+    "housing": {"a": 0.995, "c": 0.05}, # Тяжелый, инертный
 }
 
+# Три абсолютно разных PID
+PID_GAINS = {
+    "shaft":   {"kp": 1.5, "ki": 0.2, "kd": 0.1},
+    "flange":  {"kp": 3.0, "ki": 0.5, "kd": 0.2},
+    "housing": {"kp": 5.0, "ki": 1.0, "kd": 0.5},
+}
+
+# Для afc_bode.py (графики АФХ/Боде)
+NOMINAL_PARAMS = {
+    "shaft":   {"k": 1.00, "tau": 1.0},
+    "flange":  {"k": 1.50, "tau": 0.5},
+    "housing": {"k": 0.50, "tau": 2.0},
+}
+
+def items():
+    return NOMENCLATURE
+
+def names():
+    return [item["name"] for item in NOMENCLATURE]
+
+def get_pid_gains(key):
+    return PID_GAINS[key]
 
 def nominal_params(key):
-    """Параметры объекта для номенклатуры (ключ 'shaft'/'flange'/'housing')."""
     return dict(NOMINAL_PARAMS.get(key, NOMINAL_PARAMS["shaft"]))

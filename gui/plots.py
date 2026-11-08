@@ -8,16 +8,14 @@ from config import A2, D4, DELTA, G, IDLE_THRESHOLD, N_HIGH, N_LOW, T_START, T_T
 from gui.labels import PARAMETERS, zone_labels
 from plant import plant
 
-# Толщины линий оставляем увеличенными для наглядности
 MODE_STYLE = {
-    'rl':  ('С регулятором (RL)', 'tab:blue', 3.8),
+    'rl': ('RL (Свёрточная сеть)', 'tab:blue', 3.8),
     'pid': ('PID-регулятор', 'tab:green', 2.8),
-    'mpc': ('MPC — модель предсказуемого управления', 'tab:orange', 2.8),
+    'mpc': ('MPC (Предсказание)', 'tab:orange', 2.8),
 }
 
 
 def fit_ylim(ax, values, include=(), pad_lo=0.05, pad_hi=0.05):
-    """Уменьшенные отступы для более крупного отображения данных."""
     values = np.asarray(values, dtype=float)
     lo = min([values.min(), *include])
     hi = max([values.max(), *include])
@@ -28,7 +26,6 @@ def fit_ylim(ax, values, include=(), pad_lo=0.05, pad_hi=0.05):
 class FigureWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        # Увеличенный холст, чтобы графикам было где "развернуться"
         self.figure = Figure(figsize=(16, 10), constrained_layout=True)
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
@@ -86,15 +83,16 @@ class SimulationPlot(FigureWidget):
         t = np.arange(T_TOTAL)
 
         self.ax_k.axhline(G, color='k', alpha=0.4, label=f"Программное задание g = {G}")
-        self.ax_k.axhspan(G - DELTA, G + DELTA, color='green', alpha=0.12,
-                          label=f"Допустимая полоса ±{DELTA}")
+        self.ax_k.axhspan(G - DELTA, G + DELTA, color='green', alpha=0.12, label=f"Допустимая полоса ±{DELTA}")
         if scenario != 'S4':
             for ax in (self.ax_k, self.ax_u, self.ax_n):
                 ax.axvline(T_START, color='gray', ls=':')
 
         k_values = [G - DELTA, G + DELTA]
-        for mode in ('rl', 'pid', 'mpc'):              # порядок отрисовки не зависит от порядка ключей results
-            if mode not in results:
+
+        # Отрисовка K(t) для всех трех регуляторов
+        for mode in ('rl', 'pid', 'mpc'):
+            if mode not in results or mode not in MODE_STYLE:
                 continue
             result = results[mode]
             label, color, width = MODE_STYLE[mode]
@@ -103,18 +101,16 @@ class SimulationPlot(FigureWidget):
             k_values.extend(result.K)
 
         cmap = matplotlib.colormaps['tab10']
+        # Отрисовка u(t) и N(t) строго для RL (чтобы не было визуального шума)
         if 'rl' in results:
             u = results['rl'].u
             for j, label in enumerate(zone_labels()):
                 line, = self.ax_u.plot([], [], color=cmap(j), lw=2.5, label=label)
                 self._series.append((line, t, u[:, j]))
-        self.ax_u.axhline(IDLE_THRESHOLD, color='orange', ls='--', lw=1.8,
-                          label=f"П/Г Х.Х.")
+        self.ax_u.axhline(IDLE_THRESHOLD, color='orange', ls='--', lw=1.8, label=f"П/Г Х.Х.")
         self.ax_u.axhline(-IDLE_THRESHOLD, color='orange', ls='--', lw=1.8)
 
         u_values = results['rl'].u if 'rl' in results else np.zeros(1)
-
-        # --- НАСТРОЙКА ОСИ Y ДЛЯ u(t) ---
         u_min, u_max = u_values.min(), u_values.max()
         span_u = max(u_max - u_min, 0.5)
         self.ax_u.set_ylim(u_min - 0.1 * span_u, u_max + 0.5 * span_u)
@@ -131,27 +127,18 @@ class SimulationPlot(FigureWidget):
         self.ax_n.axhline(N_LOW, color='k', ls='--', alpha=0.4, lw=1.5)
         self.ax_n.axhline(N_HIGH, color='k', ls='--', alpha=0.4, lw=1.5)
 
-        # --- НАСТРОЙКА ОСИ Y ДЛЯ N_i(t) ---
         n_values_all = np.array(n_values_all)
         n_min, n_max = n_values_all.min(), n_values_all.max()
-
         span_n = max(n_max - n_min, 0.15)
-        # Даем много места снизу (45% пустоты), чтобы линии не наезжали на легенду
         self.ax_n.set_ylim(n_min - 0.45 * span_n, n_max + 0.1 * span_n)
 
-        # --- НАСТРОЙКА ОСИ Y ДЛЯ K(t) ---
         k_min, k_max = min(k_values), max(k_values)
         span_k = max(k_max - k_min, 0.1)
         self.ax_k.set_ylim(k_min - 0.05 * span_k, k_max + 0.45 * span_k)
 
         self.ax_k.set_xlim(0, T_TOTAL - 1)
 
-        # ЕДИНЫЕ РАЗМЕРЫ ШРИФТОВ ДЛЯ ВСЕХ ГРАФИКОВ
-        self.ax_k.set_title(
-            f"{scenario}: {description}  (масштаб {scale:.2f}, seed {seed})",
-            fontsize=16,
-            pad=10
-        )
+        self.ax_k.set_title(f"{scenario}: {description}  (масштаб {scale:.2f}, seed {seed})", fontsize=16, pad=10)
         self.ax_k.set_ylabel("K(t)", fontsize=14)
         self.ax_u.set_ylabel("u(t)", fontsize=14)
         self.ax_n.set_ylabel("Nᵢ(t)", fontsize=14)
@@ -161,18 +148,12 @@ class SimulationPlot(FigureWidget):
             ax.grid(alpha=0.3)
             ax.tick_params(labelsize=12)
 
-        # Легенда K(t)
         self.ax_k.legend(loc='upper right', ncol=2, fontsize=12, framealpha=0.9)
-
-        # Легенда u(t): ncol=5 для 9 элементов (8 зон + «П/Г Х.Х.») даёт ровно 2 строки (5+4)
         self.ax_u.legend(loc='upper right', ncol=5, fontsize=12, framealpha=0.9)
-
-        # Легенда N_i(t) - в нижнем правом углу, 4 колонки (2 строки)
         self.ax_n.legend(loc='lower right', ncol=4, fontsize=12, framealpha=0.9)
 
         self._heads = []
         for line, _, _ in self._series:
-            # Размер маркеров (точек на концах линий при анимации)
             head, = line.axes.plot([], [], 'o', color=line.get_color(), ms=9)
             self._heads.append(head)
 
@@ -245,9 +226,7 @@ class ChartPlot(FigureWidget):
 
 
 class TrainingPlot(FigureWidget):
-    """Кривые обучения PPO: доход за эпизод (обучение) и метрика J на проверочной выборке объектов (меньше - лучше)."""
-
-    SMOOTH = 10           # окно скользящего среднего дохода, итераций
+    SMOOTH = 10
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -268,7 +247,8 @@ class TrainingPlot(FigureWidget):
         self.ax_j.set_yscale('log')
         self._ret_line, = self.ax_r.plot([], [], color='tab:blue', alpha=0.35, lw=1.5, label='Обучающая выборка')
         self._avg_line, = self.ax_r.plot([], [], color='tab:blue', lw=2.5, label=f'Скользящее среднее ({self.SMOOTH})')
-        self._j_line, = self.ax_j.plot([], [], color='tab:orange', lw=2.5, marker='o', ms=5, label='Проверочная выборка')
+        self._j_line, = self.ax_j.plot([], [], color='tab:orange', lw=2.5, marker='o', ms=5,
+                                       label='Проверочная выборка')
         self.ax_r.legend(loc='lower right', fontsize=12)
         self.ax_j.legend(loc='upper right', fontsize=12)
         self.canvas.draw_idle()
