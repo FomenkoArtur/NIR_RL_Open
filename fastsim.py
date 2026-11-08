@@ -82,26 +82,18 @@ def episode_noise(seed, noise_scale=1.0):
 
 
 def build_features_batch(eps, n):
-    """(B, W) и (B, W, 8) -> (B, 17, W), как episode.build_features."""
-    eps = np.asarray(eps, dtype=np.float32)
+    """(B, W) и (B, W, 8) -> (B, 8, W), как episode.build_features."""
     n = np.asarray(n, dtype=np.float32)
-    w = plant.w.astype(np.float32)
-    return np.concatenate([eps[:, None, :] / 0.5,
-                           ((n - 0.5) * 2.0).transpose(0, 2, 1),
-                           (n * w).transpose(0, 2, 1) * 4.0], axis=1)
+    return ((n - 0.5) * 2.0).transpose(0, 2, 1)
 
 
 def window_features(eps, n):
-    """Окна длины WINDOW для каждого такта t (слева повторяется такт 0): -> (B, T, 17, WINDOW)."""
-    eps = np.asarray(eps, dtype=np.float32)
+    """Окна длины WINDOW для каждого такта t (слева повторяется такт 0): -> (B, T, 8, WINDOW)."""
     n = np.asarray(n, dtype=np.float32)
     pad = WINDOW - 1
-    eps = np.concatenate([np.repeat(eps[:, :1], pad, axis=1), eps], axis=1)
     n = np.concatenate([np.repeat(n[:, :1], pad, axis=1), n], axis=1)
-    w = plant.w.astype(np.float32)[:, None]
-    e_win = np.lib.stride_tricks.sliding_window_view(eps, WINDOW, axis=1)
     n_win = np.lib.stride_tricks.sliding_window_view(n, WINDOW, axis=1)
-    return np.concatenate([e_win[:, :, None, :] / 0.5, (n_win - 0.5) * 2.0, (n_win * w) * 4.0], axis=2)
+    return (n_win - 0.5) * 2.0
 
 
 @dataclass

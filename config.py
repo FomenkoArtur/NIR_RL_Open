@@ -42,7 +42,7 @@ ZONE_LAYOUTS = {
 CONTROL_LAYOUT = 'parameter'
 ZONES = ZONE_LAYOUTS[CONTROL_LAYOUT]
 N_ZONES = len(ZONES)
-N_FEATURES = 1 + 2 * N_PARAMS
+N_FEATURES = N_PARAMS                     # вход CNN: 8 нормализованных показателей N_i (без eps и u)
 
 # ========== ВРЕМЕННЫЕ ПАРАМЕТРЫ ==========
 WINDOW = 32
