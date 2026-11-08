@@ -10,8 +10,9 @@ from plant import plant
 
 # Толщины линий оставляем увеличенными для наглядности
 MODE_STYLE = {
-    'none': ('Без регулятора', 'tab:red', 3.2),
-    'rl': ('С регулятором (RL)', 'tab:blue', 3.8),
+    'rl':  ('С регулятором (RL)', 'tab:blue', 3.8),
+    'pid': ('PID-регулятор', 'tab:green', 2.8),
+    'mpc': ('MPC — модель предсказуемого управления', 'tab:orange', 2.8),
 }
 
 
@@ -92,7 +93,7 @@ class SimulationPlot(FigureWidget):
                 ax.axvline(T_START, color='gray', ls=':')
 
         k_values = [G - DELTA, G + DELTA]
-        for mode in ('none', 'rl'):                    # порядок отрисовки не зависит от порядка ключей results
+        for mode in ('rl', 'pid', 'mpc'):              # порядок отрисовки не зависит от порядка ключей results
             if mode not in results:
                 continue
             result = results[mode]
