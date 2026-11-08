@@ -1,14 +1,14 @@
 """
-tune_cnn.py - подбор архитектуры RL-регулятора (Optuna: TPE + Hyperband), критерий - замкнутый контур (метрика J на
-выборке рандомизированных объектов после короткого обучения PPO). Всё берётся из проекта: config_rl.py (настройки,
-пределы сети), rl_core.py (среда, сеть, PPO, оценка), hw.py / hw_tune.py (устройства, потоки, число воркеров).
+tune_cnn.py - обучение RL-регулятора фиксированной архитектуры 8 -> 8. Подбор архитектуры удалён:
+сеть задана в config_rl.RL_ARCH. Optuna перебирает только гиперпараметры обучения PPO (LR, weight decay,
+размер батча), а критерий - замкнутый контур (метрика J на выборке рандомизированных объектов).
 
 Запуск:  python tune_cnn.py [испытаний] [воркеров]     по умолчанию 60 и число воркеров из tuned/hw_tune.json
          (hw_tune.py подбирает его под ваше железо; без замера - 2 воркера на каждую видеокарту)
 Воркеры раскладываются по всем устройствам одного типа (все видеокарты CUDA / все XPU / процессор). Бюджет испытаний
 общий: быстрое устройство делает больше. Прерванный подбор продолжается - испытания лежат в tuned/cnn_rl_study.db.
-Результат: tuned/cnn_rl.json (архитектура, отчёт) и tuned/controller_rl.pt (веса); архитектуру подхватывает config_rl.py,
-полное обучение - python rl_trainer.py или кнопка в GUI.
+Результат: tuned/cnn_rl.json (гиперпараметры, отчёт) и tuned/controller_rl.pt (веса); гиперпараметры подхватывает
+config_rl.py, полное обучение - python rl_trainer.py или кнопка в GUI.
 """
 
 import hw
@@ -62,41 +62,20 @@ def wait_enqueued(study, wid, timeout=600):
         time.sleep(1.0)
 
 
-MANUAL_RL = {'n_conv': 3, 'c1': 32, 'c2': 64, 'c3': 64, 'k1': 5, 'k2': 3, 'k3': 3,    # первое испытание - архитектура
-             'norm': 'layer', 'temporal': 'avg', 'pool': 8, 'skip': 0, 'ctx_z': 0, 'fc': 128,   # по умолчанию
-             'head': 'direct', 'film': False, 'LR': 3e-4, 'WEIGHT_DECAY': 1e-8, 'BATCH_SIZE': 2048}
+MANUAL_HP = {'LR': 3e-4, 'WEIGHT_DECAY': 1e-8, 'BATCH_SIZE': 2048}   # первое испытание - параметры по умолчанию
 
 
-def suggest_rl(trial):
-    """Пространство поиска: свёртки, нормализация, сжатие по времени, контекст, тип выхода, FiLM, параметры обучения."""
-    n_conv = trial.suggest_int('n_conv', 2, 4)
-    p = {'n_conv': n_conv}
-    for i in range(1, n_conv + 1):
-        p[f'c{i}'] = trial.suggest_categorical(f'c{i}', [16, 32, 64, 128])   # число фильтров слоя i
-        p[f'k{i}'] = trial.suggest_categorical(f'k{i}', [3, 5, 7])           # длина фильтра слоя i
-    p['norm'] = trial.suggest_categorical('norm', ['layer', 'group', 'none'])
-    p['temporal'] = trial.suggest_categorical('temporal', ['avg', 'none'])
-    if p['temporal'] == 'avg':
-        p['pool'] = trial.suggest_categorical('pool', [4, 8, 16])
-    p['skip'] = trial.suggest_int('skip', 0, 4)                              # последних тактов входа напрямую в FC
-    p['ctx_z'] = trial.suggest_categorical('ctx_z', [0, 8, 16])              # контекст истории (0 - выключен)
-    if p['ctx_z'] > 0:
-        p['ctx_type'] = trial.suggest_categorical('ctx_type', ['conv', 'gru'])
-    p['fc'] = trial.suggest_categorical('fc', [64, 128, 256])
-    p['head'] = trial.suggest_categorical('head', ['direct', 'delta', 'pid_res'])
-    p['film'] = trial.suggest_categorical('film', [False, True])
-    p['LR'] = trial.suggest_float('LR', 1e-4, 3e-3, log=True)
-    p['WEIGHT_DECAY'] = trial.suggest_float('WEIGHT_DECAY', 1e-8, 1e-2, log=True)
-    p['BATCH_SIZE'] = trial.suggest_categorical('BATCH_SIZE', [1024, 2048, 4096])
-    return p
+def suggest_hp(trial):
+    """Пространство поиска только гиперпараметров обучения; архитектура фиксирована (8 -> 8)."""
+    return {'LR': trial.suggest_float('LR', 1e-4, 3e-3, log=True),
+            'WEIGHT_DECAY': trial.suggest_float('WEIGHT_DECAY', 1e-8, 1e-2, log=True),
+            'BATCH_SIZE': trial.suggest_categorical('BATCH_SIZE', [1024, 2048, 4096])}
 
 
 def split_rl(p):
-    """Параметры испытания -> (архитектура, обучение); отсутствующие условные берутся из RL_ARCH."""
+    """Параметры испытания -> (фиксированная архитектура, гиперпараметры обучения)."""
     train = {k: p[k] for k in ('LR', 'WEIGHT_DECAY', 'BATCH_SIZE')}
-    arch = dict(RL_ARCH)
-    arch.update({k: v for k, v in p.items() if k not in train})
-    return arch, train
+    return dict(RL_ARCH), train
 
 
 # ============================ воркер ============================
@@ -109,7 +88,7 @@ def worker(wid, target_started):
     eval_ep = R.to_device(R.suite_dr(), dev)                 # одна выборка для всех кандидатов, сразу на устройстве
 
     def objective(trial):
-        p = suggest_rl(trial)
+        p = suggest_hp(trial)
         arch, thp = split_rl(p)
         ok, info, excess = R.arch_limits(arch)               # параметры, размер, время вывода - до обучения
         for k, v in info.items():
@@ -222,9 +201,10 @@ def main():
                                 pruner=make_pruner(), storage=make_storage(), study_name=STUDY_NAME, load_if_exists=True)
     existing = started(study)
     print(f"[tune_cnn] Study '{STUDY_NAME}': испытаний уже {len(study.trials)}; новых {n_trials}; воркеров {n_workers} "
-          f"на устройствах {devices}, потоков на воркер {cfg['threads']} ({cfg['source']}); ПИД-эталон: {RL['PID']}", flush=True)
+          f"на устройствах {devices}, потоков на воркер {cfg['threads']} ({cfg['source']}); "
+          f"архитектура фиксирована: {RL_ARCH}; ПИД-эталон: {RL['PID']}", flush=True)
     if len(study.trials) == 0:
-        study.enqueue_trial(MANUAL_RL)                       # ручная конфигурация - первое испытание
+        study.enqueue_trial(MANUAL_HP)                       # ручные гиперпараметры - первое испытание
 
     ctx = mp.get_context('spawn')                            # spawn обязателен при работе с CUDA
     saved = {k: os.environ.get(k) for k in ('NIR_DEVICE', 'NIR_THREADS', 'NIR_PIN')}

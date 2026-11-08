@@ -7,20 +7,16 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from config import (DELTA, G, I_MAX, I_SEP, KD, KI, KP, N_PARAMS, N_ZONES, PID_INTEGRATOR, PID_WINDOW, SIG_CUR,
-                    T_START, T_TOTAL, WINDOW)
+from config import (DELTA, G, I_MAX, I_SEP, KD, KI, KP, N_FEATURES, N_PARAMS, N_ZONES, PID_INTEGRATOR, PID_WINDOW,
+                    SIG_CUR, T_START, T_TOTAL, WINDOW)
 from plant import plant
 from scenarios import get_disturbance_profile
 
 
 def build_features(eps_window, n_window):
-    eps = np.asarray(eps_window, dtype=np.float32)
+    """Вход CNN-регулятора: 8 нормализованных показателей N_i, форма (8, WINDOW)."""
     n = np.asarray(n_window, dtype=np.float32)
-    return np.vstack([
-        eps[None, :] / 0.5,
-        ((n - 0.5) * 2.0).T,
-        (n * plant.w.astype(np.float32)).T * 4.0,
-    ])
+    return ((n - 0.5) * 2.0)[:, :N_FEATURES].T
 
 
 @dataclass
@@ -129,7 +125,7 @@ def run_episode(scenario, policy, seed=None, scale=1.0, t0=T_START, profile=None
             state = plant.evolve(state, rate[t], u, noise)
 
         x_norm = normalizer.update(state)
-        k = plant.compute_super_criterion(x_norm)
+        k = float(np.mean(x_norm))                            # средний уровень показателей, без весов w_i
         eps = plant.G - k
         u = policy.act(eps, x_norm)
 

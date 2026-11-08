@@ -15,14 +15,13 @@ import torch.optim as optim                                     # Adam
 from config import (A_CUR, C_RAW_FACTOR, CRITICAL_SCENARIOS, DELTA, G, IDLE_THRESHOLD, IQR_TO_SIGMA, N_CONS,
                     N_FEATURES, N_PARAMS, N_WINDOW, SCENARIOS, SEED_CRITICAL_START, SIG_CUR, T_OBS, T_START,
                     T_TOTAL, WINDOW)                            # те же константы, что у прежнего кода
-from config_rl import RL                                        # конфигурация RL
+from config_rl import RL, RL_ARCH                               # конфигурация RL и фиксированная архитектура
 from fastsim import episode_noise                               # тот же шум эпизода по зерну, что раньше
 from plant import plant                                         # калибровка карт и веса (Plant(seed=42))
 from scenarios import critical_profile, custom_profile          # профили C1-C9 и тренд/скачок на показатель
 from trainer import weighted_mse                                # функция потерь имитации - та же, что сейчас
 
-V_ZONE = plant.V                                                # матрица зон (N_ZONES x 8)
-X_BAR, S_SCALE, W = plant.x_bar, plant.S, plant.w               # центр карты, ширина коридора H_i, веса w_i
+X_BAR, S_SCALE = plant.x_bar, plant.S                           # центр карты и ширина коридора H_i
 LCL, UCL, S_MIN = plant.LCL, plant.UCL, plant.S_MIN             # границы карты и нижняя граница масштаба s_min
 TREND, JUMP = SCENARIOS['S1']['rate_value'], abs(SCENARIOS['S2']['jump_value'])   # амплитуды S1 и S2 (как в tune_cnn)
 
@@ -272,7 +271,7 @@ def pid_for(ep, dev, dt):
 class RLEnv:
     """
     B сред одновременно на устройстве. Порядок такта как в Sim.run: скачок на t0, объект (34) с задержкой,
-    мёртвой зоной, насыщением и перекрёстными связями привода, нормализация (10)-(12), eps = g - K.
+    мёртвой зоной, насыщением и перекрёстными связями привода, нормализация (10)-(12).
     """
 
     def __init__(self, dev, reward=True, pid_inner=False, shadow=False):
@@ -280,9 +279,7 @@ class RLEnv:
         self.reward_on, self.pid_inner, self.is_shadow = reward, pid_inner, shadow   # награда / внутренний ПИД / «тень»
         as_t = lambda v: torch.as_tensor(np.asarray(v), dtype=self.dt, device=dev)   # константа -> тензор
         self.x_bar, self.lcl, self.ucl = as_t(X_BAR), as_t(LCL), as_t(UCL)   # калибровка карт
-        self.s_min, self.S, self.w = as_t(S_MIN), as_t(S_SCALE), as_t(W)     # s_min, H_i, веса
-        self.V = as_t(V_ZONE)                                   # внутризонные веса: K_q = V N
-        self.w32 = self.w.float()                               # веса для признаков 'legacy'
+        self.s_min, self.S = as_t(S_MIN), as_t(S_SCALE)         # s_min и ширина коридора H_i
         self.offsets = torch.arange(WINDOW, device=dev) - (WINDOW - 1)        # смещения окна входа от текущего такта
 
     def reset(self, ep):
@@ -294,9 +291,8 @@ class RLEnv:
         self.m = self.s = None                                  # оценки медианы и масштаба
         self.state = self.x_bar.repeat(b, 1)                    # x(0) = центр карты
         self.H = torch.zeros((b, T_TOTAL + D_MAX, N_PARAMS), dtype=dt, device=dev)   # история команд со сдвигом D_MAX
-        self.E = torch.empty((b, T_TOTAL), dtype=dt, device=dev)                     # eps(t)
+        self.E = torch.empty((b, T_TOTAL), dtype=dt, device=dev)                     # среднее отклонение от задания
         self.N = torch.empty((b, T_TOTAL, N_PARAMS), dtype=dt, device=dev)           # N_i(t)
-        self.UP = torch.zeros((b, T_TOTAL, N_PARAMS), device=dev)                    # u(t-1) - канал u входа сети
         self.u_last = torch.zeros((b, N_PARAMS), dtype=dt, device=dev)               # последняя команда
         self.held = torch.zeros(b, dtype=torch.long, device=dev)                     # тактов подряд с |eps| <= delta
         self.e_peak = torch.zeros(b, dtype=dt, device=dev)                           # пик текущего отклонения
@@ -318,7 +314,7 @@ class RLEnv:
         self.state = self.state + torch.where(hit, self.ep['jump'], torch.zeros_like(self.ep['jump']))   # скачок состояния
 
     def _observe(self):
-        """Нормализация (10)-(12) - тот же код, что в Sim.run (tune_cnn.py), и eps = g - K."""
+        """Нормализация (10)-(12) - тот же код, что в Sim.run (tune_cnn.py); ошибка - среднее отклонение N_i от G."""
         st, t = self.state, self.t                              # состояние и такт
         admitted = ((st >= self.lcl) & (st <= self.ucl)) | (self.valid == 0)   # в окно - только внутри карты (или окно пусто)
         row = torch.where(admitted, st, torch.full_like(st, float('nan')))     # не принятые - NaN
@@ -337,17 +333,16 @@ class RLEnv:
             empty = v == 0                                      # окно пусто - оценки не меняются
             self.m, self.s = torch.where(empty, self.m, m_new), torch.where(empty, self.s, s_new)
         x_norm = 0.5 * (1.0 + torch.tanh(0.5 * (st - self.m) / self.s))   # N_i(t), формула (12)
-        self.N[:, t], self.E[:, t] = x_norm, G - x_norm @ self.w          # eps = g - K, K по формуле (13)
-        self.UP[:, t] = self.u_last.float()                     # канал u: команда прошлого такта
+        self.N[:, t] = x_norm                                   # 8 нормализованных показателей - вход сети
+        self.E[:, t] = G - x_norm.mean(dim=1)                   # средняя ошибка по показателям, без весов w_i
         if self.pid is not None:                                # внутренний ПИД вызывается ровно раз за такт
             self.u_pid = self.pid.act(x_norm)
 
-    def window(self, feat):
-        """Вход сети (B, 17, WINDOW), float32; слева окно дополняется тактом 0, как в CNNPolicy."""
+    def window(self, feat=None):
+        """Вход сети: (B, 8, WINDOW), float32 - 8 нормализованных показателей N_i; окно слева дополняется тактом 0."""
         idx = torch.clamp(self.offsets + self.t, min=0)         # такты окна
-        e, n = self.E[:, idx].float(), self.N[:, idx].float()   # eps и N_i в окне
-        third = self.UP[:, idx] if feat == 'u' else n * self.w32 * 4.0   # 8 каналов u или прежние w_i*N_i
-        return torch.cat([e[:, None, :] / 0.5, ((n - 0.5) * 2.0).transpose(1, 2), third.transpose(1, 2)], dim=1)
+        n = self.N[:, idx].float()                              # N_i в окне, (B, WINDOW, 8)
+        return ((n - 0.5) * 2.0).transpose(1, 2)                # (B, 8, WINDOW), те же масштабы, что в CNNPolicy
 
     def extra(self, head):
         """Вектор мимо свёрток: c_ref (+ u_ПИД)."""
@@ -394,12 +389,12 @@ class RLEnv:
 
     def _reward(self, u, du, e_old):
         rw, st, dt = RL['REWARD'], self.state, self.dt          # коэффициенты, состояние, точность
-        e = self.E[:, self.t]                                   # eps(t+1) = -(K - g)
-        ae = e.abs()                                            # |dK|
+        e = self.E[:, self.t]                                   # средняя ошибка eps(t+1) по показателям
+        ae = e.abs()                                            # |eps|
         self.held = torch.where(ae <= DELTA, self.held + 1, torch.zeros_like(self.held))   # счётчик удержания в допуске
         out = ((st > self.ucl) | (st < self.lcl)).to(dt).mean(1)                   # доля показателей вне коридора
         mag = ((torch.relu(st - self.ucl) + torch.relu(self.lcl - st)) / self.S).mean(1)   # глубина выхода, в долях H_i
-        ez = self.N[:, self.t] @ self.V.T - G                   # ошибки зон K_q - g (при 'parameter' это N_i - g)
+        ez = self.N[:, self.t] - G                              # ошибки показателей N_i - g (без весов)
         zone = torch.relu(ez.abs() - DELTA).sum(1)              # суммарное выходящее за допуск отклонение зон
         r = (-rw['K_E'] * ae - rw['K_ZONE'] * zone - rw['K_OUT'] * out - rw['K_OUT_MAG'] * mag   # -|dK|, зоны, коридор
              - rw['LAMBDA_U'] * (u ** 2).mean(1) - rw['LAMBDA_DU'] * (du ** 2).mean(1)   # энергия и рывки
@@ -428,7 +423,7 @@ def _norm(kind, ch):
 
 
 class RLNet(nn.Module):
-    """Свёртки по окну 17 x WINDOW -> (сжатие) -> [признаки, skip, z, c_ref] -> FC -> выход."""
+    """Свёртки по окну 8 x WINDOW -> (сжатие) -> [признаки, skip, z, c_ref] -> FC -> выход."""
 
     def __init__(self, hp, in_ch, extra_dim_, n_out):
         super().__init__()
@@ -460,7 +455,7 @@ class RLNet(nn.Module):
         self.fc2 = nn.Linear(int(hp['fc']), n_out)              # выход: 8 (актор) или 1 (критик)
         self.relu = nn.ReLU()                                   # не inplace: тот же модуль используется в CUDA Graph
 
-    def forward(self, x, extra):                                # x: (B, 17, WINDOW), extra: (B, E)
+    def forward(self, x, extra):                                # x: (B, 8, WINDOW), extra: (B, E)
         h = x
         for conv, norm in zip(self.convs, self.norms):          # свёрточный стек
             h = self.relu(norm(conv(h)))
@@ -550,7 +545,7 @@ class PIDBaseline:
 
 
 class LegacyCNNPolicy:
-    """Прежняя CNN после имитации: вход (eps, N_i, w_i N_i), как CNNPolicy."""
+    """CNN после имитации: на вход подаются те же 8 нормализованных показателей N_i, что и в CNNPolicy."""
     need_pid = False
 
     def __init__(self, model):
@@ -560,7 +555,7 @@ class LegacyCNNPolicy:
         pass
 
     def act(self, env):
-        return self.model(env.window('legacy')).to(env.dt)      # прежние признаки, выход tanh
+        return self.model(env.window()).to(env.dt)              # выход tanh
 
 
 @torch.no_grad()
@@ -585,7 +580,7 @@ def cl_metrics(E, U, N, ep_np):
     for b in range(len(t0s)):
         t0 = int(t0s[b])
         e, u = E[b, t0:t0 + T_OBS], U[b, t0:t0 + T_OBS]         # окно наблюдения после возмущения
-        ez = N[b, t0:t0 + T_OBS] @ V_ZONE.T - G                 # ошибки зон на окне наблюдения
+        ez = N[b, t0:t0 + T_OBS] - G                            # ошибки показателей на окне наблюдения
         n = len(e)                                              # для C1-C9 короче T_OBS (t0 = 60..80)
         if quiet[b]:                                            # без возмущения важны только ложные срабатывания
             rows.append({'name': names[b], 'quiet': True, 'FA': float(np.mean(np.abs(u).max(axis=1) > IDLE_THRESHOLD))})
