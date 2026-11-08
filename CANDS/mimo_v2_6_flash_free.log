@@ -1,0 +1,11 @@
+score=0 ok=False
+.F                                                                       [100%]
+=================================== FAILURES ===================================
+_____________________________ test_improved_reward _____________________________
+ensemble/acceptance/test_wp7.py:11: in test_improved_reward
+    assert RL['REWARD']['K_E'] >= 2.0, "Вес K_E должен быть увеличен"
+E   AssertionError: Вес K_E должен быть увеличен
+E   assert 1.0 >= 2.0
+=========================== short test summary info ============================
+FAILED ensemble/acceptance/test_wp7.py::test_improved_reward - AssertionError...
+1 failed, 1 passed in 0.08s
