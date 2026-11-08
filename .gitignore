@@ -1,5 +1,10 @@
-
+﻿# NIR_RL: не коммитим веса и кэши
+controller_rl.pt
+tuned/
 .ensemble/
 __pycache__/
-*.pt
-tuned/*.db
+*.pyc
+.idea/
+.venv/
+docs/*.png
+docs/*.pdf
