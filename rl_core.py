@@ -499,15 +499,34 @@ class ActorCritic(nn.Module):
         return sum(p.numel() for p in self.actor.parameters()) + self.log_std.numel()   # в регуляторе только актор
 
 
-def command(head, raw, u_prev, u_pid):
-    """Выход сети -> команда u в [-1; 1]: прямое u, приращение (интегральное действие) или поправка к ПИД."""
+def soft_deadzone(u, threshold=None):
+    """Мягкая мёртвая зона выходного сигнала: |u| <= threshold -> строго 0,
+    иначе sign(u) * (|u| - threshold). Непрерывна в нуле и не пропускает шум малой амплитуды."""
+    if threshold is None:                                       # порог по умолчанию - из конфигурации
+        threshold = float(RL['HEAD'].get('DEADZONE', 0.1))
+    if threshold <= 0.0:                                        # зона выключена
+        return u
+    return torch.sign(u) * torch.relu(u.abs() - threshold)      # «сжатие» к нулю вне зоны
+
+
+def command(head, raw, u_prev, u_pid, deadzone=True, threshold=None):
+    """Выход сети -> команда u в [-1; 1]: прямое u, приращение (интегральное действие) или поправка к ПИД.
+    Мёртвая зона применяется к вкладу сети: у 'direct' - ко всему выходу, у 'delta'/'pid_res' - к приращению
+    или поправке, чтобы не обнулять предыдущую команду и ПИД-базу в невозмущённых каналах."""
     h = RL['HEAD']                                              # пределы приращения и поправки
     if head == 'direct':                                        # прямое u
-        return torch.tanh(raw)
+        u = torch.tanh(raw)
+        return soft_deadzone(u, threshold) if deadzone else u
     if head == 'delta':                                         # u_t = clip(u_{t-1} + du)
-        return torch.clamp(u_prev + h['DU_MAX'] * torch.tanh(raw), -1.0, 1.0)
+        du = h['DU_MAX'] * torch.tanh(raw)
+        if deadzone:
+            du = soft_deadzone(du, threshold)
+        return torch.clamp(u_prev + du, -1.0, 1.0)
     if head == 'pid_res':                                       # ПИД + ограниченная поправка
-        return torch.clamp(u_pid + h['RES_MAX'] * torch.tanh(raw), -1.0, 1.0)
+        res = h['RES_MAX'] * torch.tanh(raw)
+        if deadzone:
+            res = soft_deadzone(res, threshold)
+        return torch.clamp(u_pid + res, -1.0, 1.0)
     raise ValueError(f'head={head!r}')
 
 
@@ -721,7 +740,8 @@ class PPO:
             total = torch.zeros((), device=dev)                 # сумма потерь без синхронизации в цикле
             for i in range(0, n - bs + 1, bs):
                 idx = perm[i:i + bs]
-                u = command(self.head, self.ac.actor(X[idx], EX[idx]), UP[idx], UPID[idx])   # команда сети
+                u = command(self.head, self.ac.actor(X[idx], EX[idx]), UP[idx], UPID[idx],
+                            deadzone=False)                 # имитация учителя без мёртвой зоны (чистая супервизия)
                 loss = weighted_mse(u, Y[idx])                  # та же функция потерь, что у прежней имитации
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
