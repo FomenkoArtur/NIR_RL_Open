@@ -1,4 +1,5 @@
-"""Вкладки АФХ (годограф Найквиста) и Боде (ЛАЧХ/ЛФЧХ) для замкнутого контура с RL (WP6).
+"""
+Вкладки АФХ (годограф Найквиста) и Боде (ЛАЧХ/ЛФЧХ) для замкнутого контура с RL (WP6).
 
 Только numpy + PySide6 + matplotlib: импорт torch в gui/ запрещён, поэтому
 частотная характеристика считается по номинальной дискретной модели объекта
@@ -34,7 +35,9 @@ class FrequencyResponseBase(FigureWidget):
         self.combo.currentIndexChanged.connect(self.refresh)
 
         self.w = np.linspace(1e-4, np.pi, 1200)
-        self.refresh()
+        # self.refresh() убран из базового класса:
+        # потомки создают оси (self.ax / self.ax_mag / self.ax_ph) уже после super().__init__()
+        # и сами вызывают refresh() в конце своего конструктора.
 
     def control_row(self):
         row = QHBoxLayout()
@@ -49,7 +52,7 @@ class FrequencyResponseBase(FigureWidget):
         k = float(params["k"])
         a = float(config.A_CUR)
         # Входной коэффициент каждого канала так, чтобы статический gain канала был k;
-        # небольшое поправление на калиброванную ширину коридора S_i по каналам.
+        # небольшая поправка на калиброванную ширину коридора S_i по каналам.
         b = k * (1.0 - a) * (plant.S / float(plant.S.mean()))
         z = np.exp(-1j * self.w)
         h = b[:, None] / (1.0 - a * z)[None, :]          # (8, W) открытый контур объекта
