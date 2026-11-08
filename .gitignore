@@ -8,3 +8,12 @@ __pycache__/
 .venv/
 docs/*.png
 docs/*.pdf
+.venv/
+.ensemble/
+__pycache__/
+*.pyc
+.idea/
+tuned/
+controller_rl.pt
+diagnostics/
+*.log

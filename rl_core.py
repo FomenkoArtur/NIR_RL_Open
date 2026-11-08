@@ -395,8 +395,12 @@ class RLEnv:
         mag = ((torch.relu(st - self.ucl) + torch.relu(self.lcl - st)) / self.S).mean(1)   # глубина выхода, в долях H_i
         ez = self.N[:, self.t] - G                              # ошибки показателей N_i - g (без весов)
         zone = torch.relu(ez.abs() - DELTA).sum(1)              # суммарное выходящее за допуск отклонение зон
+        fa = ((ez.abs() < rw['FA_BAND']) & (u > rw['FA_THRESH'])).to(dt)   # ложное срабатывание канала: управление без отклонения
+        static = ez.abs().mean(1)                               # статическая ошибка: среднее |ez| по каналам
         r = (-rw['K_E'] * ae - rw['K_ZONE'] * zone - rw['K_OUT'] * out - rw['K_OUT_MAG'] * mag   # -|dK|, зоны, коридор
              - rw['LAMBDA_U'] * (u ** 2).mean(1) - rw['LAMBDA_DU'] * (du ** 2).mean(1)   # энергия и рывки
+             - rw['LAMBDA_FA'] * (u * fa).mean(1)               # ложные срабатывания: u > FA_THRESH при |ez| < FA_BAND
+             - rw['LAMBDA_STATIC'] * static                     # статическая ошибка: отклонение от g = 0.5
              + rw['BONUS'] * (self.held >= N_CONS).to(dt))      # бонус: |dK| <= delta уже T_h тактов подряд
         if RL['REF']['MODE'] == 'tau':                          # эталон: |e| сжимается не медленнее exp(-1/T_ref)
             r = r - rw['LAMBDA_REF'] * torch.relu(ae - self.rho * e_old.abs() - DELTA)   # штраф за отставание

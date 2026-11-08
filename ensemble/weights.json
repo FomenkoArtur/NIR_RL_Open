@@ -1,7 +1,7 @@
 {
   "deepseek_v4_1_flash_free": {
     "alpha": 2.0,
-    "beta": 3.0
+    "beta": 4.0
   },
   "nemotron_3_5_super_vl_free": {
     "alpha": 3.0,

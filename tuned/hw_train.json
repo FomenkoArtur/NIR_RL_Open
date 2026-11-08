@@ -1,10 +1,10 @@
 {
   "device": "cuda:0",
-  "threads": 1,
+  "threads": 8,
   "pin": "",
   "envs": 256,
-  "est_iter_sec": 0.41,
+  "est_iter_sec": 0.51,
   "name": "NVIDIA GeForce RTX 3090 Ti",
   "host": "afl",
-  "measured": "2026-11-05T13:39"
+  "measured": "2026-11-08T09:47"
 }

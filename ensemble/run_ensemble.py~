@@ -1,0 +1,60 @@
+#!/usr/bin/env python
+"""
+ensemble/run_ensemble.py
+Ansambliirovanie modelei OpenCode: generate -> verify -> judge -> fuse -> refine.
+"""
+import argparse, json, os, re, shutil, subprocess, sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+from bayesian import ModelWeights
+
+ROOT = Path(__file__).resolve().parents[1]
+WORK = ROOT / ".ensemble"
+OC = shutil.which("opencode") or "opencode"
+
+SERVER = os.environ.get("OC_URL", "http://127.0.0.1:4096")
+MSG = ("Read the file TASK.md in the root of the working directory and carry it out completely. "
+       "Edit only files inside this directory.")
+
+PERSONAS = [
+    "Стначал продумай решение, запиши краткий план в PLAN.md, затем реализуй.",
+    "Сначала внимательно прочитай тесты приемки и существующий код, затем делай минимальные точные правки.",
+    "Сначала проверь физическую и математическую корректность (размерности, знаки, устойчивость), потом пиши код.",
+    "Работай маленькими шагами: после каждого шага запускай тесты приемки и исправляй.",
+]
+
+TEMPLATE = """# Роль
+Ты — инженер по системам автоматического управления и Python/PyTorch. {persona}
+
+# Спецификация работы{spec}
+
+# Приемка
+Критерий готовости — прохождение тестов `{test}`. Запускай: `python -m pytest {test} -q --tb=short`.
+Папки `ensemble/acceptance` и `ensemble/specs` НЕ ИзМЕНЯЙ (правки будут откачены).
+Не подгоняй код под тесты в обход смысла. Закончив, кратко напиши, что сделано. Не делай git commit.
+"""
+
+JUDGE = """# Роль
+Ты — строгий независимый рецензент кода.
+В папке CANDS/ лежат решения m<imя>.diff`.
+kИмена строго это не превышает результат работы моделей, они слишком сложные для нас задачи.
+
+# РезультатКеай только JSON в файл `{out}`:
+{{"ranking": ["имя лучшего"
+  "best_ideas": [{"from": "имя", "what": "ия идря"}],
+  "notes": "кратко"}
+Iмена брать строго из списка: {names}
+"""
+
+FUSE = """# Роль
+Ты — ведущий инженер, объединяешь лучшие решения.
+# Задача
+?Текущая папка — лучшее решение. Рецензенты выделили идеи из столбцов вернуть изменения, екли они не ломают победителя.
+# Премьера приемки сборки необходимо исправить код для тезтов.
+
+{ideas}
+
+# Проверка слияния.
+Примечательные весы слито на предоставленной модели.
+Запускайте `python -m pytest {test} -q --tb=short`.
