@@ -28,6 +28,8 @@ from gui.workers import ExperimentWorker, TrainWorker
 from metrics import compute_metrics, out_of_control_rate
 from plant import plant
 from scenarios import get_disturbance_profile
+from pid_control import PIDController
+from mpc_control import MPCController
 
 
 # === ОПЦИОНАЛЬНЫЙ МОДУЛЬ ИНДИКАТОРА СОСТОЯНИЯ ===
@@ -505,7 +507,7 @@ class MainWindow(QMainWindow):
         result = self.results.get(mode)
         if result is None:
             mode, result = next(iter(self.results.items()))
-        self.chart_plot.show_chart(result, self.chart_param_box.currentIndex(), MODE_LABELS[mode])
+        self.chart_plot.show_chart(result, self.chart_param_box.currentIndex(), MODE_LABELS.get(mode, "Без регулятора" if mode == "none" else mode))
 
     def toggle_playback(self):
         if not self.results:
