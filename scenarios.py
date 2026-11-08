@@ -8,13 +8,26 @@ from plant import plant
 
 
 # ========== ФИЗИЧНЫЕ ТРЕНДЫ ТЕСТОВОЙ ВЫБОРКИ (T1-T3) ==========
-# Форма каждого тренда - хевисайд x линейная функция:
-#     rate(t)[i] = v * 1[t >= t0],
-# то есть до момента t0 возмущение отсутствует, а после t0 к состоянию каждый
-# такт добавляется постоянная скорость v, поэтому накопленное отклонение растёт
-# линейно (та же постоянная скорость, что в сценарии S1). Амплитуды v заданы в
-# долях размаха контрольного коридора S_i и пересчитываются в абсолютные единицы
-# умножением на plant.S - как в get_disturbance_profile и custom_profile.
+# Форма каждого тренда - хевисайд x линейная функция. Спецификация (SPEC.md,
+# п. "Формализация хевисайд x линейная функция") допускает две формы записи
+# темпа rate(t)[i]:
+#
+#   1) постоянная скорость (та же, что в сценарии S1):
+#          rate(t)[i] = v * 1[t >= t0],
+#      то есть до момента t0 возмущение отсутствует, а после t0 к состоянию
+#      каждый такт добавляется постоянная скорость v, поэтому накопленное
+#      отклонение dx(t)[i] = v * (t - t0) * 1[t >= t0] растёт линейно;
+#
+#   2) линейный разгон темпа (linear ramp):
+#          rate(t)[i] = v * (t - t0) * (t >= t0) / (T_TOTAL - t0),
+#      где v - полная амплитуда темпа к концу эпизода; эта форма реализована
+#      в вспомогательной функции _physical_trend_rate ниже.
+#
+# Для T1-T3 выбрана форма 1: тепловой дрейф шпинделя, усталостная вибрация
+# и загрязнение теплообменника в первом приближении линейны по времени.
+# Амплитуды v заданы в долях размаха контрольного коридора S_i и пересчитываются
+# в абсолютные единицы умножением на plant.S - как в get_disturbance_profile
+# и custom_profile.
 _PHYSICAL_TRENDS = [
     {
         'name': 'T1',
@@ -55,7 +68,7 @@ _PHYSICAL_TRENDS = [
 _PHYSICAL_TRENDS_BY_NAME = {trend['name']: trend for trend in _PHYSICAL_TRENDS}
 
 
-def get_physical_trends():
+def get_physical_trends() -> list[dict]:
     """
     Возвращает список физичных трендов тестовой выборки:
     [
@@ -73,17 +86,18 @@ def get_physical_trends():
     return [dict(trend) for trend in _PHYSICAL_TRENDS]
 
 
-def get_physical_trend_profile(name):
+def get_physical_trend_profile(name: str) -> tuple[np.ndarray, np.ndarray]:
     """
     Возвращает (rate, jump) для тренда T1-T3 - в том же формате, что
     get_disturbance_profile и custom_profile:
     rate - добавка к состоянию на каждом такте, jump - скачок на такте t0
     (у физичных трендов скачка нет).
 
-    Форма - хевисайд x линейная функция: rate[t, i] = v * 1[t >= t0],
-    то есть до t0 возмущения нет, после t0 скорость постоянна и отклонение
-    растёт линейно. Амплитуда пересчитана в абсолютные единицы умножением
-    на plant.S.
+    Форма - хевисайд x линейная функция, вариант 1 (постоянная скорость):
+    rate[t, i] = v * 1[t >= t0], то есть до t0 возмущения нет, после t0
+    скорость постоянна и отклонение растёт линейно. Вариант 2 (linear ramp)
+    реализован в _physical_trend_rate. Амплитуда пересчитана в абсолютные
+    единицы умножением на plant.S.
     """
     spec = _PHYSICAL_TRENDS_BY_NAME.get(name)
     if spec is None:
@@ -97,6 +111,28 @@ def get_physical_trend_profile(name):
 
     rate[t0:, spec['param']] = spec['rate']      # хевисайд 1[t >= t0] * постоянная скорость
     return rate * plant.S, jump * plant.S
+
+
+def _physical_trend_rate(t_start: int, v: float, param: int) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Профиль физичного тренда в форме 2 (linear ramp):
+
+        rate(t)[i] = v * (t - t_start) * (t >= t_start) / (T_TOTAL - t_start)
+
+    где v - полная амплитуда темпа к концу эпизода, t_start - такт начала
+    тренда. Хевисайдова ступенька (t >= t_start) обнуляет возмущение до момента
+    начала тренда, линейный множитель (t - t_start) даёт плавный разгон темпа
+    от нуля, а нормировка на (T_TOTAL - t_start) обеспечивает достижение
+    амплитуды v к последнему такту эпизода. Возвращает (rate, jump) в командах
+    профиля возмущений (jump нулевой - тренд не даёт скачков).
+    """
+    assert 0 <= t_start < T_TOTAL, \
+        f't_start={t_start} за пределами эпизода (T_TOTAL={T_TOTAL})'
+    rate = np.zeros((T_TOTAL, N_PARAMS))
+    t = np.arange(T_TOTAL, dtype=float)
+    idx = np.nonzero(t >= t_start)[0]            # хевисайд 1[t >= t_start]
+    rate[idx, param] = v * (t[idx] - t_start) / (T_TOTAL - t_start)
+    return rate * plant.S, np.zeros(N_PARAMS)
 
 
 def get_disturbance_profile(scenario, t0=T_START, scale=1.0):
