@@ -11,7 +11,7 @@ from pid_control import PIDController
 from mpc_control import MPCController
 from rl_core import cref_features
 from config_rl import RL
-
+from rl_core import command, cref_features
 
 @dataclass
 class EpisodeResult:
@@ -52,6 +52,7 @@ def simulate_all(scenario, seed, scale, nom_key, rl_controller=None):
 
     res = {m: {'X': [], 'N': [], 'K': [], 'E': [], 'U': []} for m in ['rl', 'pid', 'mpc']}
 
+    u_prev = torch.zeros((1, 8))                                 # последняя команда RL (для головы 'delta')
     for t in range(T_TOTAL):
         if t == T_START:
             for m in x: x[m] += jump
@@ -74,17 +75,18 @@ def simulate_all(scenario, seed, scale, nom_key, rl_controller=None):
             n_arr = np.array(n_p).T
             features = torch.from_numpy((n_arr - 0.5) * 2.0).float().unsqueeze(0)
             with torch.no_grad():
-                raw = rl_policy.ac.actor(features, cref_f)
-                u_rl_raw = torch.tanh(raw).squeeze(0).numpy()
-
-                # Сглаживание
-                u_rl_hist.append(u_rl_raw)
-                if len(u_rl_hist) > 3: u_rl_hist.pop(0)
-                u_rl_smooth = np.mean(u_rl_hist, axis=0)
-
-                # Мертвая зона 0.1
-                dz = 0.1
-                u_rl = np.where(np.abs(u_rl_smooth) < dz, 0.0, u_rl_smooth - np.sign(u_rl_smooth) * dz)
+                extra = cref_f[:, :0] if rl_policy.ac.per_ch else cref_f   # сеть по каналам c_ref не принимает
+                raw = rl_policy.ac.actor(features, extra)
+                if rl_policy.head == 'direct':                   # прежние веса: u = tanh(raw), сглаживание и мёртвая зона 0.1
+                    u_rl_raw = torch.tanh(raw).squeeze(0).numpy()
+                    u_rl_hist.append(u_rl_raw)
+                    if len(u_rl_hist) > 3: u_rl_hist.pop(0)
+                    u_rl_smooth = np.mean(u_rl_hist, axis=0)
+                    dz = 0.1
+                    u_rl = np.where(np.abs(u_rl_smooth) < dz, 0.0, u_rl_smooth - np.sign(u_rl_smooth) * dz)
+                else:                                            # 'delta': ровно та же команда, что в обучении и в check_rl.py
+                    u_prev = command(rl_policy.head, raw, u_prev, None)
+                    u_rl = u_prev.squeeze(0).numpy().astype(float)
         else:
             u_rl = np.zeros(8)
 

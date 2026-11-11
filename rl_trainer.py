@@ -34,7 +34,7 @@ def get_device():
 
 
 def train_rl(arch=None, train_hp=None, seed=SEED, iters=None, log=print, on_iter=None, should_stop=None,
-             validate=False):
+             validate=True):
     """
     Имитация ПИД (если включена) + PPO. Возвращает ActorCritic на CPU в режиме eval или None, если остановлено до 1-й итерации.
     on_iter(it, stats) - после каждой итерации (stats: ret, kl и val_J, если в эту итерацию считалась проверка);
@@ -42,8 +42,9 @@ def train_rl(arch=None, train_hp=None, seed=SEED, iters=None, log=print, on_iter
     выборке рандомизированных объектов (метрика J, меньше - лучше) и в конце вернуть лучшие по J веса.
     """
     arch, train_hp = dict(arch or RL_ARCH), dict(train_hp or RL_TRAIN)
-    iters = iters or RL['PPO']['ITERS']
+    iters = RL['PPO']['ITERS'] if iters is None else int(iters)  # --iters 0: только имитация
     dev = get_device()
+    suite = R.to_device(R.suite_val(), dev) if validate else None  # номинал + DR с шумом до x1.5
     envs = hw.envs_for(dev.type)                                # число сред под это железо (bench_train.py)
     if envs:
         RL['PPO']['N_ENVS'][dev.type] = envs
@@ -58,6 +59,10 @@ def train_rl(arch=None, train_hp=None, seed=SEED, iters=None, log=print, on_iter
         agent.pretrain_imitation()
     every = int(RL['SEARCH']['EVAL_EVERY'])
     best_j, best_state, done, t0 = float('inf'), None, 0, time.perf_counter()
+    if suite is not None and RL['IMIT']['ENABLED']:             # веса сразу после имитации - тоже кандидат: PPO не должен их ухудшить
+        best_j = R.rl_evaluate(R.RLPolicy(agent.ac, RL['FEAT']), suite, dev)['J']
+        best_state = {k: v.detach().clone() for k, v in agent.ac.state_dict().items()}
+        log(f"После имитации: J = {best_j:.3f}")
     for it in range(1, iters + 1):
         if should_stop is not None and should_stop():
             log("Обучение остановлено пользователем.")
@@ -74,7 +79,7 @@ def train_rl(arch=None, train_hp=None, seed=SEED, iters=None, log=print, on_iter
         if it == 1 or it % 10 == 0:
             log(f"  итерация {it}: доход {st['ret']:.3f}, KL {st['kl']:.4f}, "
                 f"{(time.perf_counter() - t0) / it:.1f} с/итерация")
-    if done == 0:
+    if done == 0 and best_state is None:
         return None
     if best_state is not None:
         agent.ac.load_state_dict(best_state)
@@ -96,7 +101,7 @@ def load(path=None):
     if not os.path.exists(path):
         raise FileNotFoundError(f"Нет весов RL-регулятора: ни {OUT_FILE}, ни {COLAB_FILE}. "
                                 f"Сначала обучите регулятор (кнопка в GUI или python rl_trainer.py)")
-    ck = torch.load(path, map_location='cpu')                   # обучено на GPU - грузится на CPU
+    ck = torch.load(path, map_location='cpu', weights_only=False)                   # обучено на GPU - грузится на CPU
     if ck.get('ref_mode', RL['REF']['MODE']) != RL['REF']['MODE']:
         raise ValueError(f"Веса обучены с эталоном '{ck['ref_mode']}', а в config_rl сейчас '{RL['REF']['MODE']}' "
                          f"(переменная NIR_RL_REF)")

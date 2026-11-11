@@ -1,0 +1,27 @@
+/home/af/Documents/NIR_RL/NIR_RL_Open/.venv/bin/python /home/af/Documents/NIR_RL/NIR_RL_Open/check_rl.py
+/home/af/Documents/NIR_RL/NIR_RL_Open/rl_trainer.py:99: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  ck = torch.load(path, map_location='cpu')                   # обучено на GPU - грузится на CPU
+Загружено: /home/af/Documents/NIR_RL/NIR_RL_Open/controller_rl.pt
+Устройство: cuda:0; head = direct, net = conv
+
+НОМИНАЛЬНЫЙ объект:
+  S1 все            сист.ош. +0.1010   |ez| хвост 0.1010   FA эп.  0.00  max|u| 0.096
+  S2 все            сист.ош. -0.0020   |ez| хвост 0.0206   FA эп.  0.02  max|u| 0.101
+  S3 все            сист.ош. -0.0011   |ez| хвост 0.0194   FA эп.  0.02  max|u| 0.127
+  S4 все            FA эп.  0.00  max|u| 0.099
+
+РАНДОМИЗИРОВАННЫЕ объекты (a, c_i, задержка, шум, связи, мёртвая зона, насыщение):
+  S1 шум x0.5-1.5   сист.ош. +0.0983   |ez| хвост 0.0983   FA эп.  0.28  max|u| 0.143
+  S1 шум x1.5-3.0   сист.ош. +0.0994   |ez| хвост 0.0997   FA эп.  0.97  max|u| 0.255
+  S1 шум x3.0-5.1   сист.ош. +0.1118   |ez| хвост 0.1141   FA эп.  1.00  max|u| 0.491
+  S2 шум x0.5-1.5   сист.ош. -0.0015   |ez| хвост 0.0195   FA эп.  0.36  max|u| 0.211
+  S2 шум x1.5-3.0   сист.ош. +0.0056   |ez| хвост 0.0342   FA эп.  0.96  max|u| 0.328
+  S2 шум x3.0-5.1   сист.ош. +0.0032   |ez| хвост 0.0501   FA эп.  1.00  max|u| 0.501
+  S3 шум x0.5-1.5   сист.ош. -0.0020   |ez| хвост 0.0179   FA эп.  0.32  max|u| 0.137
+  S3 шум x1.5-3.0   сист.ош. -0.0001   |ez| хвост 0.0304   FA эп.  0.99  max|u| 0.283
+  S3 шум x3.0-5.1   сист.ош. -0.0061   |ez| хвост 0.0499   FA эп.  1.00  max|u| 0.547
+  S4 шум x0.5-1.5   FA эп.  0.19  max|u| 0.121
+  S4 шум x1.5-3.0   FA эп.  0.97  max|u| 0.275
+  S4 шум x3.0-5.1   FA эп.  1.00  max|u| 0.531
+
+Process finished with exit code 0

@@ -20,11 +20,11 @@ RL = {
         'ENABLED': (os.environ.get('NIR_RL_IMIT') or '1') == '1',   # флаг: 1 - имитация перед RL, 0 - RL с нуля
         'IN_PROXY': True,                                       # делать ли имитацию и в коротких прогонах подбора
         'EPISODES': 256,                                        # эпизодов учителя в выборке имитации
-        'EPOCHS': 15,                                           # эпох обучения с учителем
-        'LR': 1e-3,                                             # скорость обучения на этапе имитации
+        'EPOCHS': 40,                                           # эпох обучения с учителем
+        'LR': 2e-3,                                             # скорость обучения на этапе имитации
         'BATCH': 1024,                                          # размер батча имитации
         'DR': True,                                             # True - учитель на рандомизированных объектах, False - на номинальном
-        'LOG_STD_AFTER': -1.6,                                  # log sigma политики после имитации (меньше разброс - не портим учителя)
+        'LOG_STD_AFTER': -2.5,                                  # log sigma после имитации: для 'delta' шум копится в u, поэтому узко
         'VF_WARMUP_ITERS': 3,                                   # итераций PPO только для критика после имитации
     },
     'REWARD': {                                                 # награда на такте (все коэффициенты здесь)
@@ -41,6 +41,16 @@ RL = {
         'BONUS': 0.02,                                          # бонус за каждый такт, когда |dK| <= delta уже T_h тактов подряд
         'LAMBDA_REF': 0.5,                                      # вес отставания от эталонной модели
         'LAMBDA_OS': 1.0,                                       # вес перерегулирования сверх допустимого (режим 'tau')
+    },
+    'TEACHER': {'KP': 1.0, 'KI': 0.12},                      # учитель имитации для сети по каналам: инкрементный ПИ на N_i - g
+    'REWARD_CH': {                                              # награда ПО КАНАЛАМ (net='channel'); ошибка в единицах N_i - g
+        'A': 1.0,                                               # линейный штраф |ez| / 0.05 (|ez| не более 0.45)
+        'B': 1.0,                                               # log(1 + |ez| / 0.01): растущий градиент у нуля - тянет статическую ошибку к 0
+        'OUT': 1.0,                                             # штраф за выход канала за границы карты (|ez| > 0.45)
+        'BONUS': 0.2,                                           # бонус за каждый такт с |ez| < 0.02
+        'FA': 3.0,                                              # ложное срабатывание: |u| > FA_THR на канале БЕЗ возмущения и с |ez| < FA_BAND
+        'FA_THR': 0.07, 'FA_BAND': 0.25,                        # порог по |u| (запас до IDLE_THRESHOLD = 0.1) и полоса «канал в норме»
+        'U': 0.02, 'DU': 0.1,                                   # энергия u^2 и рывки (du / 0.1)^2
     },
     'REF': {                                                    # условие на эталонную динамику c_ref
         'MODE': os.environ.get('NIR_RL_REF') or 'tau',            # 'tau' - (T_ref, sigma_ref), 'pid' - масштабы (Kp, Ki, Kd)
@@ -97,12 +107,16 @@ RL = {
         'MAX_GRAD': 0.5,                                        # обрезка нормы градиента
         'TARGET_KL': 0.03,                                      # ранний останов эпох по KL
         'LOG_STD_INIT': -0.7,                                   # начальный log sigma без имитации
+        'LOG_STD_MIN': -3.5,                                    # нижняя граница log sigma: политика не «замерзает» до нуля
         'PRIV_CRITIC': True,                                    # критик видит параметры объекта (асимметричный actor-critic)
         'CUDA_GRAPH': True,                                     # шаг обновления PPO записывается в CUDA Graph (как train_model)
-        'ITERS': 1000,                                          # итераций при полном обучении (WP7: переобучение на новой награде)
+        'ITERS': 200,                                          # итераций при полном обучении (WP7: переобучение на новой награде)
+        'BC_COEF': 0.5,
     },
-    'HEAD': {'DU_MAX': 0.25, 'RES_MAX': 0.5, 'DEADZONE': 0.1},  # предел dU ('delta'), поправки к ПИД ('pid_res') и порог мёртвой зоны
-    'METRIC': {'W_IAE': 1.0, 'W_TS': 3.0, 'W_OS': 5.0, 'W_EN': 0.5, 'W_FA': 2.0, 'W_ZE': 10.0, 'OS_FROM': 10},  # веса метрики замкнутого контура
+    'HEAD': {'DU_MAX': 0.25, 'RES_MAX': 0.5, 'DEADZONE': 0.1,   # DEADZONE - порог по u для 'direct' (прежнее значение)
+             'DEADZONE_DU': 0.003},                             # порог по приращению du для 'delta': 0.1 убило бы интегральное действие
+    'METRIC': {'W_IAE': 1.0, 'W_TS': 3.0, 'W_OS': 5.0, 'W_EN': 0.5, 'W_FA': 2.0, 'W_ZE': 10.0, 'OS_FROM': 10,
+               'W_ST': 60.0, 'W_FAC': 40.0, 'ST_TAIL': 20},     # статическая ошибка (|среднее ez| за ST_TAIL тактов) и ложные срабатывания по каналам
     'SEARCH': {                                                 # подбор архитектуры (tune_cnn.py, NIR_TUNE_MODE=rl)
         'PROXY_ITERS': 60,                                      # итераций PPO в коротком прогоне (ресурс Hyperband)
         'PROXY_SEEDS': 2,                                       # seed на кандидата в коротком прогоне
@@ -120,10 +134,11 @@ RL = {
     },
     'SEEDS': {'EVAL': 160000, 'OOD': 170000, 'NOMINAL': 180000},   # зёрна оценочных выборок (не пересекаются с прежними)
 }
-RL_ARCH = {                                                     # архитектура по умолчанию = аналог текущей CNN без BatchNorm
+RL_ARCH = {                                                     # архитектура по умолчанию: сеть по каналам + приращение команды
+    'net': 'channel',                                           # 'channel' - общие веса по каналам (u_i зависит только от N_i); 'conv' - прежняя
     'n_conv': 3, 'c1': 32, 'c2': 64, 'c3': 64, 'c4': 64, 'k1': 5, 'k2': 3, 'k3': 3, 'k4': 3,   # c4/k4 - если n_conv = 4
-    'norm': 'layer', 'temporal': 'avg', 'pool': 8, 'skip': 0, 'ctx_z': 0, 'ctx_type': 'conv',
-    'fc': 128, 'head': 'direct', 'film': False,
+    'norm': 'none', 'temporal': 'avg', 'pool': 8, 'skip': 4, 'ctx_z': 0, 'ctx_type': 'conv',   # norm 'none': уровень N_i - сигнал
+    'fc': 128, 'head': 'delta', 'film': False,                  # 'delta': u_t = clip(u_{t-1} + du) - интегральное действие
 }
 RL_TRAIN = {'LR': 3e-4, 'WEIGHT_DECAY': 1e-8, 'BATCH_SIZE': 8192}   # обучение PPO по умолчанию
 # <<< END RL-CONFIG
@@ -136,8 +151,9 @@ _path = os.path.join(_TUNED_DIR, 'cnn_rl.json')                 # результ
 if os.path.exists(_path):                                       # если подбор уже был - берём найденную архитектуру
     with open(_path, encoding='utf-8') as _f:
         _tuned = json.load(_f)
-    RL_ARCH.update(_tuned.get('model', {}))                     # архитектура лучшего кандидата
-    RL_TRAIN.update(_tuned.get('train', {}))                    # LR, WEIGHT_DECAY, BATCH_SIZE
+    if _tuned.get('model', {}).get('net') == RL_ARCH['net']:    # только результат, найденный для ЭТОЙ структуры сети:
+        RL_ARCH.update(_tuned.get('model', {}))                 # старый tuned/cnn_rl.json ('direct', без 'net') не применяется
+        RL_TRAIN.update(_tuned.get('train', {}))                # LR, WEIGHT_DECAY, BATCH_SIZE
 assert RL['ALGO'] in ('ppo',), "NIR_RL_ALGO: реализован только 'ppo'"
 assert RL['FEAT'] in ('u', 'legacy'), "NIR_RL_FEAT должна быть 'u' или 'legacy'"
 assert RL['REF']['MODE'] in ('tau', 'pid'), "NIR_RL_REF должна быть 'tau' или 'pid'"

@@ -42,8 +42,10 @@ def ref_dim():
     return 3 if RL['REF']['MODE'] == 'pid' else 2               # зависит от выбранного вида эталона
 
 
-def extra_dim(head):
-    """Длина вектора, подаваемого в FC мимо свёрток: c_ref (+ u_ПИД для режима 'ПИД + поправка')."""
+def extra_dim(head, per_ch=False):
+    """Длина вектора, подаваемого в FC мимо свёрток: c_ref (+ u_ПИД для режима 'ПИД + поправка'). У сети по каналам - 0."""
+    if per_ch:
+        return 0                                                # актору по каналам нужны только 8 рядов N_i
     return ref_dim() + (N_PARAMS if head == 'pid_res' else 0)   # u_ПИД нужен сети, чтобы знать, что она поправляет
 
 
@@ -132,6 +134,11 @@ def cref_features(cref):
     return (cref - (lo + hi) / 2) / ((hi - lo) / 2)             # линейное отображение в [-1; 1]
 
 
+def _act(rate, jump):
+    """Каналы, на которые действует возмущение эпизода (8,) bool: для награды (ложные срабатывания) и метрик."""
+    return (np.abs(rate).sum(axis=0) > 0) | (np.abs(jump) > 0)
+
+
 def _pack(items):
     """Список эпизодов (словари) -> словарь массивов с первой осью = номер эпизода."""
     out = {k: np.stack([np.asarray(it[k]) for it in items]) for k in items[0] if k != 'name'}   # числовые поля
@@ -147,7 +154,8 @@ def sample_episodes(rng, n, spec=None):
         pl = _plant(rng, spec)                                  # параметры объекта
         rate, jump, t0, quiet = _disturbance(rng, pl['a'], RL['DIST'])   # возмущение
         noise = rng.normal(0.0, SIG_CUR, (T_TOTAL - 1, N_PARAMS)) * pl['ns']   # шум с масштабом этого объекта
-        items.append(dict(pl, rate=rate, jump=jump, t0=t0, quiet=quiet, noise=noise, cref=_cref(rng), name='dr'))
+        items.append(dict(pl, rate=rate, jump=jump, t0=t0, quiet=quiet, noise=noise, cref=_cref(rng), name='dr',
+                          act=_act(rate, jump)))
     return _pack(items)                                         # одним словарём массивов
 
 
@@ -161,13 +169,27 @@ def suite_nominal():
             sign = 1 if (p + (kind == 'jump')) % 2 == 0 else -1   # знак чередуется
             rate, jump = custom_profile(p, kind, sign * val, T_START)   # профиль на номинальном t0
             items.append(dict(nom, rate=rate, jump=jump, t0=T_START, quiet=False, noise=episode_noise(seed0 + k),
-                              cref=_cref_eval(), name=f'{kind} x{p + 1}'))
+                              cref=_cref_eval(), name=f'{kind} x{p + 1}', act=_act(rate, jump)))
             k += 1
     for i in range(RL['SEARCH']['N_QUIET']):                    # без возмущений: проверка ложных срабатываний
         items.append(dict(nom, rate=np.zeros((T_TOTAL, N_PARAMS)), jump=np.zeros(N_PARAMS), t0=T_START, quiet=True,
-                          noise=episode_noise(seed0 + 5000 + i), cref=_cref_eval(), name='S4'))
+                          noise=episode_noise(seed0 + 5000 + i), cref=_cref_eval(), name='S4', act=np.zeros(N_PARAMS, bool)))
     return _pack(items)
 
+def _cat_eps(a, b):
+    """Объединение двух упакованных выборок эпизодов."""
+    out = {k: np.concatenate([a[k], b[k]]) for k in a if k != 'names'}
+    out['names'] = list(a['names']) + list(b['names'])
+    return out
+
+def suite_val():
+    """Выборка отбора лучших весов: номинальный объект (тренд и скачок на каждый показатель + без возмущений) и
+    рандомизированные объекты с шумом до x1.5. При шуме x1.5-5 ложные срабатывания неизбежны для любого регулятора, поэтому
+    такие объекты в отборе не участвуют (иначе побеждает регулятор, который вообще ничего не делает)."""
+    dr = sample_episodes(np.random.RandomState(RL['SEEDS']['EVAL']), RL['SEARCH']['N_EVAL_DR'],
+                         dict(RL['DR'], NOISE=(0.5, 1.5)))
+    dr['cref'][:] = _cref_eval()
+    return _cat_eps(suite_nominal(), dr)
 
 def suite_dr(n=None, seed=None):
     """Фиксированная выборка рандомизированных объектов (одна и та же для всех кандидатов)."""
@@ -190,7 +212,7 @@ def suite_ood():
                 rate, jump, t0, quiet = _disturbance(rng, pl['a'], RL['DIST'])
             noise = rng.normal(0.0, SIG_CUR, (T_TOTAL - 1, N_PARAMS)) * pl['ns']   # шум объекта
             items.append(dict(pl, rate=rate, jump=jump, t0=t0, quiet=False, noise=noise, cref=_cref_eval(),
-                              name=spec['name']))
+                              name=spec['name'], act=_act(rate, jump)))
     return _pack(items)
 
 
@@ -202,7 +224,7 @@ def suite_critical():
         rate, jump = critical_profile(name)                     # профиль ситуации из config
         noise = episode_noise(SEED_CRITICAL_START + ep, spec.get('noise_scale', 1.0))   # тот же шум, что в тестовой выборке
         items.append(dict(nom, rate=rate, jump=jump, t0=spec['t0'], quiet=False, noise=noise,
-                          cref=_cref_eval(), name=name))
+                          cref=_cref_eval(), name=name, act=_act(rate, jump)))
     return _pack(items)
 
 
@@ -215,7 +237,9 @@ def to_device(ep, dev):
         out[k] = f(k).view(-1, 1)
     out['d'] = torch.as_tensor(ep['d'], dtype=torch.long, device=dev)    # задержка (индекс в истории команд)
     out['t0'] = torch.as_tensor(ep['t0'], dtype=torch.long, device=dev)  # такт возмущения
-    out['np'] = {'t0': np.asarray(ep['t0']), 'quiet': np.asarray(ep['quiet']), 'names': ep['names']}   # для метрик на CPU
+    act = np.asarray(ep['act'], dtype=bool) if 'act' in ep else np.zeros((len(ep['t0']), N_PARAMS), dtype=bool)   # где возмущение
+    out['act'] = torch.as_tensor(act, device=dev)               # (B, 8) bool: канал возмущён в этом эпизоде
+    out['np'] = {'t0': np.asarray(ep['t0']), 'quiet': np.asarray(ep['quiet']), 'names': ep['names'], 'act': act}   # для метрик на CPU
     return out
 
 
@@ -273,9 +297,10 @@ class RLEnv:
     мёртвой зоной, насыщением и перекрёстными связями привода, нормализация (10)-(12).
     """
 
-    def __init__(self, dev, reward=True, pid_inner=False, shadow=False):
+    def __init__(self, dev, reward=True, pid_inner=False, shadow=False, reward_ch=False):
         self.dev, self.dt = dev, _dt(dev)                       # устройство и точность объекта
         self.reward_on, self.pid_inner, self.is_shadow = reward, pid_inner, shadow   # награда / внутренний ПИД / «тень»
+        self.reward_ch = reward_ch                              # True - награда по каналам (B, 8) для сети net='channel'
         as_t = lambda v: torch.as_tensor(np.asarray(v), dtype=self.dt, device=dev)   # константа -> тензор
         self.x_bar, self.lcl, self.ucl = as_t(X_BAR), as_t(LCL), as_t(UCL)   # калибровка карт
         self.s_min, self.S = as_t(S_MIN), as_t(S_SCALE)         # s_min и ширина коридора H_i
@@ -343,8 +368,10 @@ class RLEnv:
         n = self.N[:, idx].float()                              # N_i в окне, (B, WINDOW, 8)
         return ((n - 0.5) * 2.0).transpose(1, 2)                # (B, 8, WINDOW), те же масштабы, что в CNNPolicy
 
-    def extra(self, head):
-        """Вектор мимо свёрток: c_ref (+ u_ПИД)."""
+    def extra(self, head, per_ch=False):
+        """Вектор мимо свёрток: c_ref (+ u_ПИД); у сети по каналам - пустой (B, 0)."""
+        if per_ch:
+            return self.cref_f[:, :0]
         if head == 'pid_res':                                   # сеть поправляет ПИД - должна видеть его выход
             return torch.cat([self.cref_f, self.u_pid.float()], dim=1)
         return self.cref_f                                      # иначе только c_ref
@@ -384,7 +411,28 @@ class RLEnv:
         self._observe()                                         # нормализация и eps(t+1)
         if not self.reward_on:                                  # оценка и учитель - без награды
             return None
+        if self.reward_ch:                                      # награда по каналам (B, 8)
+            return self._reward_channel(u, du)
         return self._reward(u, du, e_old)
+
+    def _reward_channel(self, u, du):
+        """
+        Награда КАЖДОГО канала отдельно (B, 8): сеть по каналам получает собственный сигнал, ошибка одного канала не
+        размывается средним по восьми. Ошибка ez = N_i - g. Линейный член + log(1 + |ez|/0.01) (градиент растёт к нулю -
+        статическая ошибка выгодна только при ez -> 0), штраф за выход из коридора, а на канале БЕЗ возмущения
+        (act = False, либо ещё до t0) - штраф за любое |u| > FA_THR (в обе стороны!), пока канал в норме (|ez| < FA_BAND).
+        """
+        c, ep, dt = RL['REWARD_CH'], self.ep, self.dt
+        ay = (self.N[:, self.t] - G).abs()                      # |N_i - g| после шага, (B, 8)
+        on = (ep['t0'] <= self.t).unsqueeze(1)                  # возмущение уже началось
+        quiet = ~(ep['act'] & on)                               # канал без возмущения (или до его начала)
+        r = (-c['A'] * torch.clamp(ay, max=0.45) / 0.05
+             - c['B'] * torch.log1p(ay / 0.01)
+             - c['OUT'] * torch.clamp(torch.relu(ay - 0.45), max=0.5) / 0.05
+             + c['BONUS'] * (ay < 0.02).to(dt)
+             - c['FA'] * (quiet & (ay < c['FA_BAND'])).to(dt) * torch.relu(u.abs() - c['FA_THR']) / 0.05
+             - c['U'] * u ** 2 - c['DU'] * (du / 0.1) ** 2)
+        return r.float()
 
     def _reward(self, u, du, e_old):
         rw, st, dt = RL['REWARD'], self.state, self.dt          # коэффициенты, состояние, точность
@@ -480,21 +528,69 @@ class RLNet(nn.Module):
         return self.fc2(self.relu(self.fc1(torch.cat(parts, dim=1))))
 
 
+class ChannelNet(nn.Module):
+    """
+    Сеть по каналам: ОДИН и тот же свёрточный энкодер применяется к ряду N_i каждого показателя (общие веса), к признакам
+    добавляется обучаемый вектор номера канала. Выход канала i зависит только от истории N_i (и от общего вектора extra у
+    критика) - перекрёстные ложные срабатывания исключены структурой. Остаточные связи: 1x1-свёртка вокруг третьего слоя и
+    линейный путь последних `skip` отсчётов ряда прямо в выход. В пуле - среднее и максимум по времени. Выход (B, 8).
+    """
+
+    def __init__(self, hp, extra_dim_, emb=8):
+        super().__init__()
+        c1, c2, c3 = int(hp['c1']), int(hp['c2']), int(hp['c3'])
+        k1, k2, k3 = int(hp['k1']), int(hp['k2']), int(hp['k3'])
+        self.conv1 = nn.Conv1d(1, c1, k1, padding=k1 // 2)
+        self.conv2 = nn.Conv1d(c1, c2, k2, padding=k2 // 2)
+        self.conv3 = nn.Conv1d(c2, c3, k3, padding=k3 // 2)
+        self.n1, self.n2, self.n3 = _norm(hp['norm'], c1), _norm(hp['norm'], c2), _norm(hp['norm'], c3)
+        self.res = nn.Conv1d(c2, c3, 1)                         # остаточная связь вокруг третьей свёртки
+        pool = int(hp['pool'])
+        self.avg, self.mx = nn.AdaptiveAvgPool1d(pool), nn.AdaptiveMaxPool1d(pool)
+        self.skip = max(int(hp.get('skip', 4)), 2)              # не менее двух последних отсчётов: уровень и приращение
+        self.emb = nn.Embedding(N_PARAMS, emb)                  # вектор канала
+        self.fc1 = nn.Linear(2 * c3 * pool + emb + extra_dim_, int(hp['fc']))
+        self.fc2 = nn.Linear(int(hp['fc']), 1)
+        self.lin = nn.Linear(self.skip, 1, bias=False)          # вход -> выход
+        self.relu = nn.ReLU()
+
+    def forward(self, x, extra):                                # x: (B, 8, WINDOW), extra: (B, E) - общий для каналов
+        b = x.shape[0]
+        z = x.reshape(b * N_PARAMS, 1, -1)                      # каждый канал - отдельный ряд с общими весами
+        h1 = self.relu(self.n1(self.conv1(z)))
+        h2 = self.relu(self.n2(self.conv2(h1)))
+        h3 = self.relu(self.n3(self.conv3(h2)) + self.res(h2))
+        parts = [self.avg(h3).flatten(1), self.mx(h3).flatten(1), self.emb.weight.repeat(b, 1)]
+        if extra.shape[1]:
+            parts.append(extra.repeat_interleave(N_PARAMS, dim=0))
+        out = self.fc2(self.relu(self.fc1(torch.cat(parts, dim=1)))) + self.lin(z[:, 0, -self.skip:])
+        return out.reshape(b, N_PARAMS)
+
+
 class ActorCritic(nn.Module):
     """Актор (подбираемая сеть) + критик той же архитектуры (видит параметры объекта) + log sigma."""
 
     def __init__(self, hp):
         super().__init__()
         self.hp, self.head = dict(hp), hp['head']               # архитектура и тип выхода
-        e = extra_dim(self.head)                                # длина вектора мимо свёрток
+        self.per_ch = hp.get('net') == 'channel'                # сеть по каналам: награда, ценность и log pi - по каналам
+        e = extra_dim(self.head, self.per_ch)                   # длина вектора мимо свёрток
         self.priv_critic = RL['PPO']['PRIV_CRITIC']             # асимметричный actor-critic
-        self.actor = RLNet(hp, N_FEATURES, e, N_PARAMS)         # регулятор: 8 выходов
-        self.critic = RLNet(hp, N_FEATURES, e + (PRIV_DIM if self.priv_critic else 0), 1)   # ценность состояния
+        if self.per_ch:
+            self.actor = ChannelNet(hp, 0)                      # регулятор: (B, 8) -> (B, 8), c_ref не нужен
+            self.critic = ChannelNet(hp, (PRIV_DIM if self.priv_critic else 0) + N_PARAMS)   # + u_{t-1}: часть состояния
+            nn.init.zeros_(self.actor.lin.weight)               # старт: du = 0
+        else:
+            self.actor = RLNet(hp, N_FEATURES, e, N_PARAMS)     # прежний регулятор: 8 выходов
+            self.critic = RLNet(hp, N_FEATURES, e + (PRIV_DIM if self.priv_critic else 0), 1)   # ценность состояния
         self.log_std = nn.Parameter(torch.full((N_PARAMS,), float(RL['PPO']['LOG_STD_INIT'])))   # разброс политики
         nn.init.orthogonal_(self.actor.fc2.weight, 0.01)        # малый выход в начале: u ~ 0 (или ~ ПИД)
         nn.init.zeros_(self.actor.fc2.bias)
 
-    def value(self, x, extra, priv):
+    def value(self, x, extra, priv, ul=None):
+        if self.per_ch:                                         # ценность каждого канала: (B, 8)
+            z = torch.cat([priv, ul], dim=1) if self.priv_critic else ul
+            return self.critic(x, z)
         z = torch.cat([extra, priv], dim=1) if self.priv_critic else extra   # критику - ещё и параметры объекта
         return self.critic(x, z).squeeze(1)                     # (B,)
 
@@ -522,8 +618,8 @@ def command(head, raw, u_prev, u_pid, deadzone=True, threshold=None):
         return soft_deadzone(u, threshold) if deadzone else u
     if head == 'delta':                                         # u_t = clip(u_{t-1} + du)
         du = h['DU_MAX'] * torch.tanh(raw)
-        if deadzone:
-            du = soft_deadzone(du, threshold)
+        if deadzone:                                            # порог по du (0.003), а не по u: иначе интегратор не накопит малую ошибку
+            du = soft_deadzone(du, h['DEADZONE_DU'] if threshold is None else threshold)
         return torch.clamp(u_prev + du, -1.0, 1.0)
     if head == 'pid_res':                                       # ПИД + ограниченная поправка
         res = h['RES_MAX'] * torch.tanh(raw)
@@ -533,9 +629,21 @@ def command(head, raw, u_prev, u_pid, deadzone=True, threshold=None):
     raise ValueError(f'head={head!r}')
 
 
-def gauss_logp(raw, mu, log_std):
-    """log pi(raw) для диагонального нормального закона (без torch.distributions - совместимо с CUDA Graph)."""
-    return (-0.5 * ((raw - mu) / log_std.exp()) ** 2 - log_std - 0.5 * LOG2PI).sum(-1)
+def teacher_du(w):
+    """Учитель сети по каналам: инкрементный ПИ по ошибке канала ez = N_i - g (w = 2 * ez - вход сети).
+    du = KP (ez_t - ez_{t-1}) + KI ez_t, не более DU_MAX. Интегральное действие даёт нулевую систематическую ошибку при тренде;
+    значения подобраны так, что на номинале ложных срабатываний нет, а на рандомизированных объектах контур устойчив."""
+    t = RL['TEACHER']
+    ez_t, ez_1 = w[:, :, -1] * 0.5, w[:, :, -2] * 0.5
+    du = t['KP'] * (ez_t - ez_1) + t['KI'] * ez_t
+    return torch.clamp(du, -RL['HEAD']['DU_MAX'], RL['HEAD']['DU_MAX'])
+
+
+def gauss_logp(raw, mu, log_std, per_ch=False):
+    """log pi(raw) для диагонального нормального закона (без torch.distributions - совместимо с CUDA Graph).
+    per_ch=True - по каналам (B, 8), иначе сумма по каналам (B,)."""
+    lp = -0.5 * ((raw - mu) / log_std.exp()) ** 2 - log_std - 0.5 * LOG2PI
+    return lp if per_ch else lp.sum(-1)
 
 
 # ---------------------------- регуляторы для оценки (единый интерфейс) ----------------------------
@@ -550,7 +658,7 @@ class RLPolicy:
         pass                                                    # состояния у сети нет: всё в окне среды
 
     def act(self, env):
-        raw = self.ac.actor(env.window(self.feat), env.extra(self.head))   # среднее политики
+        raw = self.ac.actor(env.window(self.feat), env.extra(self.head, self.ac.per_ch))   # среднее политики
         return command(self.head, raw.to(env.dt), env.u_last, env.u_pid)  # в команду привода
 
 
@@ -598,21 +706,26 @@ def cl_metrics(E, U, N, ep_np):
     """Метрики замкнутого контура по эпизодам: IAE, Ts, перерегулирование, энергия, ложные срабатывания, J."""
     m = RL['METRIC']                                            # веса и параметры метрики
     t0s, quiet, names = ep_np['t0'], ep_np['quiet'], ep_np['names']
+    act = ep_np.get('act', np.zeros((len(t0s), N_PARAMS), dtype=bool))   # каналы с возмущением
     rows = []                                                   # метрики каждого эпизода
     for b in range(len(t0s)):
         t0 = int(t0s[b])
         e, u = E[b, t0:t0 + T_OBS], U[b, t0:t0 + T_OBS]         # окно наблюдения после возмущения
         ez = N[b, t0:t0 + T_OBS] - G                            # ошибки показателей на окне наблюдения
         n = len(e)                                              # для C1-C9 короче T_OBS (t0 = 60..80)
+        inactive = ~act[b]                                      # каналы БЕЗ возмущения: на них управления быть не должно
+        fac = float(np.mean((np.abs(u[:, inactive]) > IDLE_THRESHOLD).any(axis=1))) if inactive.any() else 0.0   # ложные срабатывания по каналам
         if quiet[b]:                                            # без возмущения важны только ложные срабатывания
-            rows.append({'name': names[b], 'quiet': True, 'FA': float(np.mean(np.abs(u).max(axis=1) > IDLE_THRESHOLD))})
+            rows.append({'name': names[b], 'quiet': True, 'FA': float(np.mean(np.abs(u).max(axis=1) > IDLE_THRESHOLD)), 'FAC': fac})
             continue
         ok = np.abs(e) <= DELTA                                 # такты в допуске
         settled = (np.lib.stride_tricks.sliding_window_view(ok, N_CONS).all(axis=1)
                    if n >= N_CONS else np.zeros(1, dtype=bool))  # T_h тактов подряд в допуске
         sign = np.sign(e[1:6].mean())                           # знак начального отклонения
         os_ = max(0.0, float((-sign * e[m['OS_FROM']:]).max())) if sign != 0 and n > m['OS_FROM'] else 0.0   # как в pid_tune
-        rows.append({'name': names[b], 'quiet': False,
+        tail = ez[-int(m['ST_TAIL']):]                          # хвост окна: статическая ошибка
+        st = float(np.abs(tail[:, act[b]].mean(axis=0)).mean()) if act[b].any() else 0.0   # |среднее ez| по возмущённым каналам
+        rows.append({'name': names[b], 'quiet': False, 'ST': st, 'FAC': fac,
                      'IAE': float(np.abs(e).sum()),             # интеграл модуля ошибки
                      'TS': float(settled.argmax()) if settled.any() else float(n),   # время переходного процесса
                      'OS': os_,                                 # перерегулирование
@@ -627,10 +740,12 @@ def _aggregate(rows, by_name=True):
     dist = [r for r in rows if not r['quiet']]                  # эпизоды с возмущением
     qt = [r for r in rows if r['quiet']]                        # эпизоды без возмущения
     mean = lambda rs, k: float(np.mean([r[k] for r in rs])) if rs else 0.0   # среднее (0, если эпизодов нет)
-    o = {k: mean(dist, k) for k in ('IAE', 'TS', 'OS', 'EN', 'ZE')}   # качество переходного процесса
+    o = {k: mean(dist, k) for k in ('IAE', 'TS', 'OS', 'EN', 'ZE', 'ST')}   # качество переходного процесса
     o['FA'] = mean(qt, 'FA')                                    # доля тактов с ложным срабатыванием
+    o['FAC'] = mean(rows, 'FAC')                                # то же по каналам БЕЗ возмущения, во всех эпизодах
     o['J'] = (m['W_IAE'] * o['IAE'] + m['W_TS'] * o['TS'] / T_OBS + m['W_OS'] * o['OS']
-              + m['W_EN'] * o['EN'] + m['W_FA'] * o['FA'] + m['W_ZE'] * o['ZE'])   # комбинированная метрика (меньше - лучше)
+              + m['W_EN'] * o['EN'] + m['W_FA'] * o['FA'] + m['W_ZE'] * o['ZE']
+              + m['W_ST'] * o['ST'] + m['W_FAC'] * o['FAC'])    # комбинированная метрика (меньше - лучше)
     if by_name:                                                 # разбивка по ситуациям C1-C9 / объектам OOD
         o['by_name'] = {g: _aggregate([r for r in rows if r['name'] == g], False)
                         for g in dict.fromkeys(r['name'] for r in rows)}
@@ -654,7 +769,7 @@ def infer_ms(hp, reps=100):
     """Медианное время вывода актора на такт: CPU, батч 1, текущее число потоков."""
     ac = ActorCritic(hp).eval()                                 # отдельная копия на CPU
     x = torch.zeros((1, N_FEATURES, WINDOW))                    # одно окно
-    e = torch.zeros((1, extra_dim(hp['head'])))                 # c_ref (+ u_ПИД)
+    e = torch.zeros((1, extra_dim(hp['head'], ac.per_ch)))      # c_ref (+ u_ПИД)
     times = []
     with torch.inference_mode():
         for i in range(reps + 20):
@@ -690,34 +805,84 @@ class PPO:
         self.ac = ActorCritic(arch).to(dev)                     # сеть
         self.head, self.feat = arch['head'], RL['FEAT']         # тип выхода и вид входа
         self.n_env = int(self.cfg['N_ENVS'].get(dev.type, 64))  # число параллельных сред
-        self.env = RLEnv(dev, reward=True, pid_inner=self.head == 'pid_res')   # пакет сред (создаётся один раз)
+        self.per_ch = self.ac.per_ch                            # сеть по каналам: награда и ценность - (B, 8)
+        self.env = RLEnv(dev, reward=True, pid_inner=self.head == 'pid_res', reward_ch=self.per_ch)   # пакет сред (один раз)
         self.cuda = dev.type == 'cuda'
         lr0 = float(train_hp['LR'])
         self.params = list(self.ac.parameters())
         self.opt = optim.Adam(self.params, lr=torch.tensor(lr0, device=dev) if self.cuda else lr0,
                               weight_decay=float(train_hp['WEIGHT_DECAY']),
                               capturable=self.cuda, foreach=self.cuda or None)   # как в train_model (CUDA Graph)
-        s, b, e = N_STEPS, self.n_env, extra_dim(self.head)     # такты, среды, длина extra
+        s, b, e = N_STEPS, self.n_env, extra_dim(self.head, self.per_ch)   # такты, среды, длина extra
         z = lambda *shape: torch.zeros(shape, device=dev)       # буфер float32 на устройстве
+        vs = (s, b, N_PARAMS) if self.per_ch else (s, b)        # форма наград/ценностей: по каналам или одна на среду
         self.obs, self.ext, self.prv = z(s, b, N_FEATURES, WINDOW), z(s, b, e), z(s, b, PRIV_DIM)   # входы
-        self.raw, self.logp, self.val = z(s, b, N_PARAMS), z(s, b), z(s, b)   # действия, log pi, ценности
-        self.rew, self.adv, self.ret = z(s, b), z(s, b), z(s, b)              # награды, преимущества, цели критика
+        self.raw, self.logp, self.val = z(s, b, N_PARAMS), z(*vs), z(*vs)     # действия, log pi, ценности
+        self.rew, self.adv, self.ret = z(*vs), z(*vs), z(*vs)                 # награды, преимущества, цели критика
+        self.ulb = z(s, b, N_PARAMS)                            # u_{t-1}: часть состояния для критика сети по каналам
         n = s * b                                               # переходов за итерацию
+        vn = (n, N_PARAMS) if self.per_ch else (n,)
         self.f = {'obs': self.obs.view(n, N_FEATURES, WINDOW), 'ext': self.ext.view(n, e),   # плоские виды тех же буферов
                   'prv': self.prv.view(n, PRIV_DIM), 'raw': self.raw.view(n, N_PARAMS),       # (адреса не меняются -
-                  'logp': self.logp.view(n), 'adv': self.adv.view(n), 'ret': self.ret.view(n)}   # граф их переиспользует)
+                  'logp': self.logp.view(*vn), 'adv': self.adv.view(*vn), 'ret': self.ret.view(*vn),   # граф их переиспользует)
+                  'ul': self.ulb.view(n, N_PARAMS)}
         self.mb = min(int(train_hp['BATCH_SIZE']), n)          # размер минибатча
         self.nb = n // self.mb                                  # минибатчей за эпоху (неполный хвост отбрасывается)
         self.idx2d = torch.randperm(n, device=dev)[:self.nb * self.mb].view(self.nb, self.mb).clone()   # индексы эпохи
         self.k = torch.zeros(1, dtype=torch.long, device=dev)   # номер минибатча (растёт внутри шага)
         self.pg_coef = torch.ones((), device=dev)               # 0 - обучается только критик (после имитации)
+        self.bc_coef = torch.full((), float(self.cfg.get('BC_COEF', 0.0)) if self.per_ch else 0.0,
+                                  device=dev)  # якорь к учителю
         self.kl_acc = torch.zeros((), device=dev)               # сумма KL за эпоху
         gru = int(arch.get('ctx_z', 0)) > 0 and arch.get('ctx_type') == 'gru'   # cuDNN RNN в графе не записываем
         self.use_graph = self.cuda and self.cfg['CUDA_GRAPH'] and not gru
         self.graph, self.iter, self.vf_warmup = None, 0, 0      # граф, номер итерации, итераций разогрева критика
 
     # ---- имитация ПИД-эталона (необязательный этап) ----
+    def _imitate_teacher(self):
+        """Имитация учителя для сети по каналам: инкрементный ПИ на ez = N_i - g (teacher_du), без мёртвой зоны в цели.
+        Учитель ведёт объект, сеть смотрит на окно и повторяет du. Учитель и сеть - функции одного и того же окна N_i."""
+        cfg, dev, h = RL['IMIT'], self.dev, RL['HEAD']
+        env = RLEnv(dev, reward=False)
+        X, Y = [], []
+        left = int(cfg['EPISODES'])
+        with torch.no_grad():
+            while left > 0:
+                nb = min(self.n_env, left)
+                ep = to_device(sample_episodes(self.rng, nb, RL['DR'] if cfg['DR'] else RL['NOMINAL']), dev)
+                env.reset(ep)
+                for t in range(N_STEPS):
+                    w = env.window(self.feat)                   # (nb, 8, WINDOW), шкала (N - 0.5) * 2
+                    du = teacher_du(w)                          # цель: приращение учителя
+                    X.append(w)
+                    Y.append(du)
+                    env.step(torch.clamp(env.u_last + soft_deadzone(du, h['DEADZONE_DU']).to(env.dt), -1.0, 1.0))
+                left -= nb
+        X, Y = torch.cat(X), torch.cat(Y)
+        opt = optim.Adam(self.ac.actor.parameters(), lr=float(cfg['LR']))
+        n, bs = len(X), int(cfg['BATCH'])
+        no_extra = torch.zeros((bs, 0), device=dev)
+        for epoch in range(int(cfg['EPOCHS'])):
+            perm = torch.randperm(n, device=dev)
+            total = torch.zeros((), device=dev)
+            for i in range(0, n - bs + 1, bs):
+                idx = perm[i:i + bs]
+                pred = h['DU_MAX'] * torch.tanh(self.ac.actor(X[idx], no_extra))
+                loss = (((pred - Y[idx]) / 0.02) ** 2).mean()   # ошибка du в единицах 0.02: малые приращения важны
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.ac.actor.parameters(), 1.0)
+                opt.step()
+                total += loss.detach()
+            if epoch == 0 or (epoch + 1) % 10 == 0:
+                self.log(f"  имитация: эпоха {epoch + 1}, loss = {total.item() / max(1, n // bs):.5f}")
+        with torch.no_grad():
+            self.ac.log_std.fill_(float(cfg['LOG_STD_AFTER']))
+        self.vf_warmup = int(cfg['VF_WARMUP_ITERS'])
+
     def pretrain_imitation(self):
+        if self.per_ch:                                         # сеть по каналам: свой учитель
+            return self._imitate_teacher()
         cfg, dev = RL['IMIT'], self.dev                         # настройки имитации
         env = RLEnv(dev, reward=False, pid_inner=True)          # учитель - внутренний ПИД среды
         X, EX, UP, UPID, Y = [], [], [], [], []                 # входы, extra, u(t-1), u_ПИД, цель
@@ -764,16 +929,18 @@ class PPO:
         env.reset(to_device(sample_episodes(self.rng, self.n_env), self.dev))   # новые объекты и возмущения (одна пересылка)
         ac.eval()
         std = ac.log_std.exp()                                  # разброс политики
+        pc = self.per_ch
         for t in range(N_STEPS):                                # эпизод целиком на устройстве
-            x, e, p = env.window(self.feat), env.extra(self.head), env.priv()
+            x, e, p = env.window(self.feat), env.extra(self.head, pc), env.priv()
+            ul = env.u_last.float()                             # u_{t-1}
             mu = ac.actor(x, e)                                 # среднее политики
             raw = mu + std * torch.randn_like(mu)               # стохастическое действие (до tanh / clip)
-            self.obs[t], self.ext[t], self.prv[t], self.raw[t] = x, e, p, raw   # в буферы
-            self.logp[t] = gauss_logp(raw, mu, ac.log_std)      # log pi старой политики
-            self.val[t] = ac.value(x, e, p)                     # ценность состояния
+            self.obs[t], self.ext[t], self.prv[t], self.raw[t], self.ulb[t] = x, e, p, raw, ul   # в буферы
+            self.logp[t] = gauss_logp(raw, mu, ac.log_std, pc)  # log pi старой политики (по каналам или суммарно)
+            self.val[t] = ac.value(x, e, p, ul)                 # ценность состояния
             self.rew[t] = env.step(command(self.head, raw.to(env.dt), env.u_last, env.u_pid))   # шаг всех сред
-        last = ac.value(env.window(self.feat), env.extra(self.head), env.priv())   # эпизод обрезан по времени: бутстрэп
-        a = torch.zeros(self.n_env, device=self.dev)            # GAE
+        last = ac.value(env.window(self.feat), env.extra(self.head, pc), env.priv(), env.u_last.float())   # бутстрэп
+        a = torch.zeros_like(self.val[0])                       # GAE
         for t in reversed(range(N_STEPS)):
             nv = last if t == N_STEPS - 1 else self.val[t + 1]  # ценность следующего состояния
             a = self.rew[t] + g * nv - self.val[t] + g * lam * a
@@ -786,19 +953,26 @@ class PPO:
         f, c = self.f, self.cfg
         idx = self.idx2d.index_select(0, self.k).view(-1)       # текущий минибатч (индекс - тензор, графу подходит)
         x, e, p = f['obs'].index_select(0, idx), f['ext'].index_select(0, idx), f['prv'].index_select(0, idx)
+        ul = f['ul'].index_select(0, idx)
         raw, lp_old = f['raw'].index_select(0, idx), f['logp'].index_select(0, idx)
         adv, ret = f['adv'].index_select(0, idx), f['ret'].index_select(0, idx)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)           # нормировка преимуществ
-        lp = gauss_logp(raw, self.ac.actor(x, e), self.ac.log_std)   # log pi новой политики
+        mu = self.ac.actor(x, e)  # среднее политики
+        lp = gauss_logp(raw, mu, self.ac.log_std, self.per_ch)  # log pi новой политики
         ratio = torch.exp(lp - lp_old)                          # отношение вероятностей
         pg = -torch.min(ratio * adv, torch.clamp(ratio, 1 - c['CLIP'], 1 + c['CLIP']) * adv).mean()   # PPO-clip
-        vf = ((self.ac.value(x, e, p) - ret) ** 2).mean()       # потери критика
+        vf = ((self.ac.value(x, e, p, ul) - ret) ** 2).mean()   # потери критика
         ent = (self.ac.log_std + 0.5 * (LOG2PI + 1.0)).sum()    # энтропия нормального закона
         loss = self.pg_coef * pg + c['VF_COEF'] * vf - c['ENT_COEF'] * ent
+        if self.per_ch:  # якорь: PPO дообучает вокруг учителя, а не уходит в пассивность
+            bc = (((RL['HEAD']['DU_MAX'] * torch.tanh(mu) - teacher_du(x)) / 0.02) ** 2).mean()
+            loss = loss + self.bc_coef * bc
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.params, c['MAX_GRAD'])
         self.opt.step()
+        with torch.no_grad():
+            self.ac.log_std.clamp_(min=float(c['LOG_STD_MIN']))  # политика не схлопывается в ноль
         self.kl_acc.add_((lp_old - lp).mean().detach())         # приближённый KL
         self.k.add_(1)                                          # к следующему минибатчу
 
@@ -859,7 +1033,7 @@ def _ms(vals):
 
 def print_report(results, log=print):
     """results: {регулятор: {выборка: [метрики по seed]}} -> таблицы для каждой выборки."""
-    keys = ('IAE', 'TS', 'OS', 'EN', 'ZE', 'FA', 'J')           # столбцы
+    keys = ('IAE', 'TS', 'OS', 'EN', 'ZE', 'ST', 'FA', 'FAC', 'J')   # столбцы
     for suite, title in SUITE_TITLES.items():
         rows = [(n, r[suite]) for n, r in results.items() if suite in r]   # регуляторы, оценённые на этой выборке
         if not rows:
