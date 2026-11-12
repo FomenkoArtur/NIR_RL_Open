@@ -431,7 +431,7 @@ class RLEnv:
              - c['OUT'] * torch.clamp(torch.relu(ay - 0.45), max=0.5) / 0.05
              + c['BONUS'] * (ay < 0.02).to(dt)
              - c['FA'] * (quiet & (ay < c['FA_BAND'])).to(dt) * torch.relu(u.abs() - c['FA_THR']) / 0.05
-             - c['U'] * u ** 2 - c['DU'] * (du / 0.1) ** 2)
+             - c['U'] * u ** 2 - c['DU'] * (du / 0.5) ** 2)
         return r.float()
 
     def _reward(self, u, du, e_old):
@@ -628,15 +628,17 @@ def command(head, raw, u_prev, u_pid, deadzone=True, threshold=None):
         return torch.clamp(u_pid + res, -1.0, 1.0)
     raise ValueError(f'head={head!r}')
 
-
 def teacher_du(w):
     """Учитель сети по каналам: инкрементный ПИ по ошибке канала ez = N_i - g (w = 2 * ez - вход сети).
-    du = KP (ez_t - ez_{t-1}) + KI ez_t, не более DU_MAX. Интегральное действие даёт нулевую систематическую ошибку при тренде;
-    значения подобраны так, что на номинале ложных срабатываний нет, а на рандомизированных объектах контур устойчив."""
+    du = kp(|ez|) (ez_t - ez_{t-1}) + KI ez_t, где kp растёт с KP до KP_BIG при |ez| от Q1 до Q2 (быстрое
+    возвращение больших отклонений без накопления интеграла; в зоне шума усиление малое - ложных срабатываний нет)."""
     t = RL['TEACHER']
     ez_t, ez_1 = w[:, :, -1] * 0.5, w[:, :, -2] * 0.5
-    du = t['KP'] * (ez_t - ez_1) + t['KI'] * ez_t
-    return torch.clamp(du, -RL['HEAD']['DU_MAX'], RL['HEAD']['DU_MAX'])
+    s = torch.clamp((ez_t.abs() - t['Q1']) / (t['Q2'] - t['Q1']), 0.0, 1.0)
+    kp = t['KP'] + (t['KP_BIG'] - t['KP']) * s * s * (3.0 - 2.0 * s)   # нелинейное усиление: на шуме KP, на большом отклонении KP_BIG
+    du = kp * (ez_t - ez_1) + t['KI'] * ez_t
+    lim = 0.9 * RL['HEAD']['DU_MAX']                            # не до самого предела tanh: цель имитации достижима
+    return torch.clamp(du, -lim, lim)
 
 
 def gauss_logp(raw, mu, log_std, per_ch=False):
